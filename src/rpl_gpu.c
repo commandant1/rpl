@@ -48,8 +48,9 @@ bool rpl_gpu_init() {
     EGLConfig config;
     EGLint numConfigs = 0;
     
-    // Strategy 1: Explicit 8-bit RGBA
+    // Strategy 1: Explicit 8-bit RGBA with PBUFFER (Surfaceless friendly)
     EGLint configAttribs8888[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
         EGL_RED_SIZE, 8,
         EGL_GREEN_SIZE, 8,
@@ -58,22 +59,28 @@ bool rpl_gpu_init() {
         EGL_NONE
     };
     
-    // Strategy 2: Minimal ES3
+    // Strategy 2: Minimal ES3 with PBUFFER
     EGLint configAttribsMin[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_NONE
+    };
+    
+    // Strategy 3: No Surface Type specified (Absolute fallback)
+    EGLint configAttribsAny[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
         EGL_NONE
     };
 
     if (eglChooseConfig(display, configAttribs8888, &config, 1, &numConfigs) && numConfigs > 0) {
-        // Success with 8888
+        printf("RPL GPU: Selected RGBA8888 PBuffer Config\n");
     } else if (eglChooseConfig(display, configAttribsMin, &config, 1, &numConfigs) && numConfigs > 0) {
-        // Success with minimal
-        printf("RPL GPU: Using minimal EGL config fallback.\n");
+        printf("RPL GPU: Selected Minimal PBuffer Config\n");
+    } else if (eglChooseConfig(display, configAttribsAny, &config, 1, &numConfigs) && numConfigs > 0) {
+        printf("RPL GPU: Selected Generic Config\n");
     } else {
-        // Fallback: Try removing ES3 bit just to see (though we need it later)
-        // Actually, if we can't get ES3, we can't run.
         fprintf(stderr, "Failed to choose EGL config for GLES 3.0+\n");
-        // Dump error code
+        fprintf(stderr, "NumConfigs found: %d\n", numConfigs);
         fprintf(stderr, "EGL Error: 0x%x\n", eglGetError());
         return false;
     }
