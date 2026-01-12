@@ -62,6 +62,10 @@ static void load_gl_funcs() {
     p_glDispatchCompute = (PFNGLDISPATCHCOMPUTEPROC)eglGetProcAddress("glDispatchCompute");
     p_glMemoryBarrier = (PFNGLMEMORYBARRIERPROC)eglGetProcAddress("glMemoryBarrier");
     p_glGetString = (PFNGLGETSTRINGPROC)eglGetProcAddress("glGetString");
+    
+    printf("Debug: glGetString addr: %p\n", p_glGetString);
+    printf("Debug: glGenBuffers addr: %p\n", p_glGenBuffers);
+    printf("Debug: glDispatchCompute addr: %p\n", p_glDispatchCompute);
 }
 
 // Macro helper to call dynamic pointers
