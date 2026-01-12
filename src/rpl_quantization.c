@@ -9,6 +9,8 @@
 #include <math.h>
 #include <float.h>
 
+void backward_fake_quant(Tensor* t);
+
 // ============================================================
 // Quantization Calibration
 // ============================================================
@@ -219,17 +221,37 @@ Tensor* fake_quantize_forward(FakeQuantize* fq, const Tensor* input) {
     }
     
     // Simulate quantization
+    float inv_scale = 1.0f / scale;
     #pragma omp parallel for
     for (uint32_t i = 0; i < input->size; i++) {
         // Quantize
-        int32_t q = (int32_t)roundf(input->data[i] / scale + zp);
+        int32_t q = (int32_t)roundf(input->data[i] * inv_scale + zp);
         q = (q < -128) ? -128 : (q > 127 ? 127 : q);
         
         // Dequantize
         output->data[i] = (q - zp) * scale;
     }
     
-    return output;
+    // Straight-Through Estimator (STE) for Backward Pass:
+    // Gradient flows through as if it was identity, but clipps if outside range [-128, 127] roughly.
+    // For simplicity, we just attach identity backward or custom STE if needed.
+    // Here we assume simple identity STE in rpl_core's autograd if we manually set parents.
+    if (output->requires_grad) {
+        output->parent1 = (void*)input;
+        output->backward_fn = backward_fake_quant; // Need to implement this
+        output->is_leaf = false;
+    }
+
+// STE Backward: gradient passes through 1.0 if inside range
+void backward_fake_quant(Tensor* t) {
+    Tensor* input = (Tensor*)t->parent1;
+    if (input && input->grad) {
+        #pragma omp parallel for
+        for (uint32_t i = 0; i < t->size; i++) {
+            input->grad[i] += t->grad[i]; // STE: Identity gradient
+        }
+        if (input->backward_fn) input->backward_fn(input);
+    }
 }
 
 void fake_quantize_free(FakeQuantize* fq) {
