@@ -56,10 +56,21 @@ add_executable(rpl_train_xor examples/train_xor.c)
 target_link_libraries(rpl_train_xor PRIVATE rpl)
 
 # Installation
-install(TARGETS rpl rpl_static rpl_gpu_test rpl_train_xor
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-    RUNTIME DESTINATION bin)
+# GPU Test Executable (Only if GPU is enabled)
+if (USE_GPU)
+    add_executable(rpl_gpu_test examples/gpu_test.c)
+    target_link_libraries(rpl_gpu_test PRIVATE rpl ${LIBS})
+    
+    install(TARGETS rpl rpl_static rpl_gpu_test rpl_train_xor
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin)
+else()
+    install(TARGETS rpl rpl_static rpl_train_xor
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin)
+endif()
 install(FILES include/rpl.h
     DESTINATION include
 )
