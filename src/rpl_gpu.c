@@ -17,6 +17,76 @@ static EGLContext context = EGL_NO_CONTEXT;
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
 #endif
 
+// Function pointers for GLES 3.1
+static PFNGLGENBUFFERSPROC p_glGenBuffers = NULL;
+static PFNGLBINDBUFFERPROC p_glBindBuffer = NULL;
+static PFNGLBUFFERDATAPROC p_glBufferData = NULL;
+static PFNGLMAPBUFFERRANGEPROC p_glMapBufferRange = NULL;
+static PFNGLUNMAPBUFFERPROC p_glUnmapBuffer = NULL;
+static PFNGLCREATESHADERPROC p_glCreateShader = NULL;
+static PFNGLSHADERSOURCEPROC p_glShaderSource = NULL;
+static PFNGLCOMPILESHADERPROC p_glCompileShader = NULL;
+static PFNGLGETSHADERIVPROC p_glGetShaderiv = NULL;
+static PFNGLGETSHADERINFOLOGPROC p_glGetShaderInfoLog = NULL;
+static PFNGLCREATEPROGRAMPROC p_glCreateProgram = NULL;
+static PFNGLATTACHSHADERPROC p_glAttachShader = NULL;
+static PFNGLLINKPROGRAMPROC p_glLinkProgram = NULL;
+static PFNGLDELETESHADERPROC p_glDeleteShader = NULL;
+static PFNGLUSEPROGRAMPROC p_glUseProgram = NULL;
+static PFNGLBINDBUFFERBASEPROC p_glBindBufferBase = NULL;
+static PFNGLUNIFORM1UIPROC p_glUniform1ui = NULL;
+static PFNGLGETUNIFORMLOCATIONPROC p_glGetUniformLocation = NULL;
+static PFNGLDISPATCHCOMPUTEPROC p_glDispatchCompute = NULL;
+static PFNGLMEMORYBARRIERPROC p_glMemoryBarrier = NULL;
+static PFNGLGETSTRINGPROC p_glGetString = NULL;
+
+static void load_gl_funcs() {
+    p_glGenBuffers = (PFNGLGENBUFFERSPROC)eglGetProcAddress("glGenBuffers");
+    p_glBindBuffer = (PFNGLBINDBUFFERPROC)eglGetProcAddress("glBindBuffer");
+    p_glBufferData = (PFNGLBUFFERDATAPROC)eglGetProcAddress("glBufferData");
+    p_glMapBufferRange = (PFNGLMAPBUFFERRANGEPROC)eglGetProcAddress("glMapBufferRange");
+    p_glUnmapBuffer = (PFNGLUNMAPBUFFERPROC)eglGetProcAddress("glUnmapBuffer");
+    p_glCreateShader = (PFNGLCREATESHADERPROC)eglGetProcAddress("glCreateShader");
+    p_glShaderSource = (PFNGLSHADERSOURCEPROC)eglGetProcAddress("glShaderSource");
+    p_glCompileShader = (PFNGLCOMPILESHADERPROC)eglGetProcAddress("glCompileShader");
+    p_glGetShaderiv = (PFNGLGETSHADERIVPROC)eglGetProcAddress("glGetShaderiv");
+    p_glGetShaderInfoLog = (PFNGLGETSHADERINFOLOGPROC)eglGetProcAddress("glGetShaderInfoLog");
+    p_glCreateProgram = (PFNGLCREATEPROGRAMPROC)eglGetProcAddress("glCreateProgram");
+    p_glAttachShader = (PFNGLATTACHSHADERPROC)eglGetProcAddress("glAttachShader");
+    p_glLinkProgram = (PFNGLLINKPROGRAMPROC)eglGetProcAddress("glLinkProgram");
+    p_glDeleteShader = (PFNGLDELETESHADERPROC)eglGetProcAddress("glDeleteShader");
+    p_glUseProgram = (PFNGLUSEPROGRAMPROC)eglGetProcAddress("glUseProgram");
+    p_glBindBufferBase = (PFNGLBINDBUFFERBASEPROC)eglGetProcAddress("glBindBufferBase");
+    p_glUniform1ui = (PFNGLUNIFORM1UIPROC)eglGetProcAddress("glUniform1ui");
+    p_glGetUniformLocation = (PFNGLGETUNIFORMLOCATIONPROC)eglGetProcAddress("glGetUniformLocation");
+    p_glDispatchCompute = (PFNGLDISPATCHCOMPUTEPROC)eglGetProcAddress("glDispatchCompute");
+    p_glMemoryBarrier = (PFNGLMEMORYBARRIERPROC)eglGetProcAddress("glMemoryBarrier");
+    p_glGetString = (PFNGLGETSTRINGPROC)eglGetProcAddress("glGetString");
+}
+
+// Macro helper to call dynamic pointers
+#define glGenBuffers p_glGenBuffers
+#define glBindBuffer p_glBindBuffer
+#define glBufferData p_glBufferData
+#define glMapBufferRange p_glMapBufferRange
+#define glUnmapBuffer p_glUnmapBuffer
+#define glCreateShader p_glCreateShader
+#define glShaderSource p_glShaderSource
+#define glCompileShader p_glCompileShader
+#define glGetShaderiv p_glGetShaderiv
+#define glGetShaderInfoLog p_glGetShaderInfoLog
+#define glCreateProgram p_glCreateProgram
+#define glAttachShader p_glAttachShader
+#define glLinkProgram p_glLinkProgram
+#define glDeleteShader p_glDeleteShader
+#define glUseProgram p_glUseProgram
+#define glBindBufferBase p_glBindBufferBase
+#define glUniform1ui p_glUniform1ui
+#define glGetUniformLocation p_glGetUniformLocation
+#define glDispatchCompute p_glDispatchCompute
+#define glMemoryBarrier p_glMemoryBarrier
+#define glGetString p_glGetString
+
 bool rpl_gpu_init() {
     if (display != EGL_NO_DISPLAY) return true; // Already initialized
 
@@ -110,8 +180,15 @@ config_found:;
         fprintf(stderr, "Failed to make context current\n");
         return false;
     }
+    
+    // Load function pointers
+    load_gl_funcs();
 
-    printf("RPL GPU Initialized: %s\n", glGetString(GL_VERSION));
+    if (p_glGetString) {
+        printf("RPL GPU Initialized: %s\n", p_glGetString(GL_VERSION));
+    } else {
+        printf("RPL GPU Initialized (Function loading failed?)\n");
+    }
     return true;
 }
 
