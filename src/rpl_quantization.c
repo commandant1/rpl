@@ -238,9 +238,12 @@ Tensor* fake_quantize_forward(FakeQuantize* fq, const Tensor* input) {
     // Here we assume simple identity STE in rpl_core's autograd if we manually set parents.
     if (output->requires_grad) {
         output->parent1 = (void*)input;
-        output->backward_fn = backward_fake_quant; // Need to implement this
+        output->backward_fn = backward_fake_quant;
         output->is_leaf = false;
     }
+    
+    return output;
+}
 
 // STE Backward: gradient passes through 1.0 if inside range
 void backward_fake_quant(Tensor* t) {
