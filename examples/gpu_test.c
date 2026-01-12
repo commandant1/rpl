@@ -88,6 +88,49 @@ int main() {
     tensor_free(t);
     tensor_free(t2);
     tensor_free(out);
+
+    // ============================================
+    // Test GEMM
+    // ============================================
+    printf("\nTesting GPU GEMM (Matrix Multiplication)...\n");
+    // 32x32 matrices to test full tiles
+    uint32_t M=32, N=32, K=32;
+    uint32_t shapeA[] = {M, K};
+    uint32_t shapeB[] = {K, N};
+    uint32_t shapeC[] = {M, N};
+
+    Tensor* A = tensor_create(2, shapeA, false);
+    Tensor* B = tensor_create(2, shapeB, false);
+    Tensor* C = tensor_create(2, shapeC, false);
+
+    // Init A with 1.0, B with Identity
+    for(int i=0; i<M*K; i++) A->data[i] = 1.0f;
+    for(int r=0; r<K; r++) {
+        for(int c=0; c<N; c++) {
+            B->data[r*N + c] = (r == c) ? 1.0f : 0.0f;
+        }
+    }
+
+    tensor_matmul_gpu(C, A, B);
+    tensor_from_gpu(C);
+
+    // Expect C to be all 1.0s because A * I = A
+    bool gemm_passed = true;
+    for(int i=0; i<M*N; i++) {
+        if (C->data[i] != 1.0f) {
+            printf("GEMM Mismatch at %d: %f\n", i, C->data[i]);
+            gemm_passed = false;
+            break;
+        }
+    }
+    
+    if (gemm_passed) printf("GPU GEMM verified!\n");
+    else return 1;
+
+    tensor_free(A);
+    tensor_free(B);
+    tensor_free(C);
+
     rpl_gpu_shutdown();
     return 0;
 }

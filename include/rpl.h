@@ -93,6 +93,7 @@ void rpl_gpu_shutdown();
 void tensor_to_gpu(Tensor* t);
 void tensor_from_gpu(Tensor* t);
 void tensor_add_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+void tensor_matmul_gpu(Tensor* C, const Tensor* A, const Tensor* B);
 
 // Initialization
 void tensor_fill(Tensor* t, float value);

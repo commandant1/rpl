@@ -180,6 +180,96 @@ void tensor_add_gpu(Tensor* out, const Tensor* a, const Tensor* b) {
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
+static const char* GEMM_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 16, local_size_y = 16) in;\n"
+    "layout(std430, binding = 0) readonly buffer InputA { float A[]; };\n"
+    "layout(std430, binding = 1) readonly buffer InputB { float B[]; };\n"
+    "layout(std430, binding = 2) writeonly buffer Output { float C[]; };\n"
+    "uniform uint M;\n"
+    "uniform uint N;\n"
+    "uniform uint K;\n"
+    "shared float tileA[16][16];\n"
+    "shared float tileB[16][16];\n"
+    "void main() {\n"
+    "    uint row = gl_GlobalInvocationID.y;\n"
+    "    uint col = gl_GlobalInvocationID.x;\n"
+    "    uint localRow = gl_LocalInvocationID.y;\n"
+    "    uint localCol = gl_LocalInvocationID.x;\n"
+    "    float sum = 0.0;\n"
+    "    for (uint t = 0u; t < (K + 15u) / 16u; t++) {\n"
+    "        uint tilingK = t * 16u;\n"
+    "        if (row < M && tilingK + localCol < K)\n"
+    "            tileA[localRow][localCol] = A[row * K + tilingK + localCol];\n"
+    "        else\n"
+    "            tileA[localRow][localCol] = 0.0;\n"
+    "        if (col < N && tilingK + localRow < K)\n"
+    "            tileB[localRow][localCol] = B[(tilingK + localRow) * N + col];\n"
+    "        else\n"
+    "            tileB[localRow][localCol] = 0.0;\n"
+    "        memoryBarrierShared();\n"
+    "        barrier();\n"
+    "        for (uint k = 0u; k < 16u; k++) {\n"
+    "            sum += tileA[localRow][k] * tileB[k][localCol];\n"
+    "        }\n"
+    "        barrier();\n"
+    "    }\n"
+    "    if (row < M && col < N) {\n"
+    "        C[row * N + col] = sum;\n"
+    "    }\n"
+    "}\n";
+
+static GLuint gemm_program = 0;
+
+void tensor_matmul_gpu(Tensor* C, const Tensor* A, const Tensor* B) {
+    if (!rpl_gpu_init()) return;
+
+    // A: [M, K], B: [K, N], C: [M, N]
+    // Assume 2D tensors for now
+    uint32_t M = A->shape[0];
+    uint32_t K = A->shape[1];
+    uint32_t N = B->shape[1];
+
+    if (B->shape[0] != K) {
+        fprintf(stderr, "GEMM Shape mismatch: %ux%u vs %ux%u\n", M, K, B->shape[0], N);
+        return;
+    }
+
+    tensor_to_gpu((Tensor*)A);
+    tensor_to_gpu((Tensor*)B);
+    
+    // Ensure C is ready
+    if (C->device != DEVICE_GPU) {
+        // Update C shape if not already correct (simplified logic)
+        C->shape[0] = M;
+        C->shape[1] = N;
+        C->size = M * N;
+        tensor_to_gpu(C);
+    }
+
+    if (gemm_program == 0) {
+        gemm_program = compile_compute_shader(GEMM_SHADER_SRC);
+        if (gemm_program == 0) return;
+    }
+
+    glUseProgram(gemm_program);
+
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, A->gpu_buffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, B->gpu_buffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, C->gpu_buffer);
+
+    glUniform1ui(glGetUniformLocation(gemm_program, "M"), M);
+    glUniform1ui(glGetUniformLocation(gemm_program, "N"), N);
+    glUniform1ui(glGetUniformLocation(gemm_program, "K"), K);
+
+    // Dispatch (16x16 tiles)
+    GLuint num_groups_x = (N + 15) / 16;
+    GLuint num_groups_y = (M + 15) / 16;
+    glDispatchCompute(num_groups_x, num_groups_y, 1);
+
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
 #else
 
 // Stubs for non-GPU builds
@@ -188,5 +278,6 @@ void rpl_gpu_shutdown() {}
 void tensor_to_gpu(Tensor* t) {}
 void tensor_from_gpu(Tensor* t) {}
 void tensor_add_gpu(Tensor* out, const Tensor* a, const Tensor* b) {}
+void tensor_matmul_gpu(Tensor* C, const Tensor* A, const Tensor* B) {}
 
 #endif
