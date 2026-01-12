@@ -51,10 +51,15 @@ target_link_libraries(rpl m pthread ${LIBS})
 add_library(rpl_static STATIC ${SOURCES})
 target_link_libraries(rpl_static m pthread ${LIBS})
 
+# C Training Example (XOR)
+add_executable(rpl_train_xor examples/train_xor.c)
+target_link_libraries(rpl_train_xor PRIVATE rpl)
+
 # Installation
-install(TARGETS rpl rpl_static
-    DESTINATION lib
-)
+install(TARGETS rpl rpl_static rpl_gpu_test rpl_train_xor
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+    RUNTIME DESTINATION bin)
 install(FILES include/rpl.h
     DESTINATION include
 )
