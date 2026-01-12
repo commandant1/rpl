@@ -27,7 +27,14 @@ class RTensor(ctypes.Structure):
         ("parent1", ctypes.c_void_p),
         ("parent2", ctypes.c_void_p),
         ("backward_fn", ctypes.c_void_p),
+        # Device
+        ("device", ctypes.c_int),
+        ("gpu_buffer", ctypes.c_uint32),
     ]
+
+class Device:
+    CPU = 0
+    GPU = 1
 
 # Function prototypes
 _lib.tensor_create.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32), ctypes.c_bool]
@@ -59,6 +66,26 @@ _lib.tensor_backward.restype = None
 
 _lib.tensor_zero_grad.argtypes = [ctypes.POINTER(RTensor)]
 _lib.tensor_zero_grad.restype = None
+_lib.tensor_zero_grad.argtypes = [ctypes.POINTER(RTensor)]
+_lib.tensor_zero_grad.restype = None
+
+# GPU prototypes
+try:
+    _lib.tensor_to_gpu.argtypes = [ctypes.POINTER(RTensor)]
+    _lib.tensor_to_gpu.restype = None
+    _lib.tensor_from_gpu.argtypes = [ctypes.POINTER(RTensor)]
+    _lib.tensor_from_gpu.restype = None
+    _lib.tensor_add_gpu.argtypes = [ctypes.POINTER(RTensor), ctypes.POINTER(RTensor), ctypes.POINTER(RTensor)]
+    _lib.tensor_add_gpu.restype = None
+    _lib.tensor_matmul_gpu.argtypes = [ctypes.POINTER(RTensor), ctypes.POINTER(RTensor), ctypes.POINTER(RTensor)]
+    _lib.tensor_matmul_gpu.restype = None
+    _lib.tensor_relu_gpu.argtypes = [ctypes.POINTER(RTensor), ctypes.POINTER(RTensor)]
+    _lib.tensor_relu_gpu.restype = None
+except AttributeError:
+    pass # GPU functions might not be available if built without USE_GPU
+
+_lib.tensor_relu.argtypes = [ctypes.POINTER(RTensor)]
+_lib.tensor_relu.restype = ctypes.POINTER(RTensor)
 
 class Tensor:
     def __init__(self, data=None, shape=None, requires_grad=False, _ptr=None):
@@ -111,17 +138,64 @@ class Tensor:
 
     def zero_grad(self):
         _lib.tensor_zero_grad(self._ptr)
+        
+    def to_gpu(self):
+        """Moves the tensor to GPU memory."""
+        if hasattr(_lib, 'tensor_to_gpu'):
+            _lib.tensor_to_gpu(self._ptr)
+        return self
+        
+    def to_cpu(self):
+        """Moves the tensor back to CPU memory."""
+        if hasattr(_lib, 'tensor_from_gpu'):
+            _lib.tensor_from_gpu(self._ptr)
+        return self
+    
+    @property
+    def device(self):
+        return self._ptr.contents.device
 
     def __add__(self, other):
         if not isinstance(other, Tensor):
             raise TypeError("Only Tensor additions supported")
+        
+        # Check if GPU dispatch is needed
+        if self.device == Device.GPU and other.device == Device.GPU:
+             if hasattr(_lib, 'tensor_add_gpu'):
+                 out_ptr = _lib.tensor_create(self._ptr.contents.dims, self._ptr.contents.shape, False)
+                 _lib.tensor_add_gpu(out_ptr, self._ptr, other._ptr)
+                 return Tensor(_ptr=out_ptr)
+        
         out_ptr = _lib.tensor_add(self._ptr, other._ptr)
         return Tensor(_ptr=out_ptr)
 
     def __matmul__(self, other):
         if not isinstance(other, Tensor):
             raise TypeError("Only Tensor matmul supported")
+            
+        if self.device == Device.GPU and other.device == Device.GPU:
+             if hasattr(_lib, 'tensor_matmul_gpu'):
+                 M = self.shape[0]
+                 N = other.shape[1]
+                 # Create output tensor [M, N]
+                 # We need to manually construct the shape array for C
+                 c_shape = (ctypes.c_uint32 * 2)(M, N)
+                 out_ptr = _lib.tensor_create(2, c_shape, False)
+                 
+                 _lib.tensor_matmul_gpu(out_ptr, self._ptr, other._ptr)
+                 return Tensor(_ptr=out_ptr)
+        
         out_ptr = _lib.tensor_matmul(self._ptr, other._ptr)
+        return Tensor(_ptr=out_ptr)
+
+    def relu(self):
+        if self.device == Device.GPU:
+            if hasattr(_lib, 'tensor_relu_gpu'):
+                 out_ptr = _lib.tensor_create(self._ptr.contents.dims, self._ptr.contents.shape, False)
+                 _lib.tensor_relu_gpu(out_ptr, self._ptr)
+                 return Tensor(_ptr=out_ptr)
+        
+        out_ptr = _lib.tensor_relu(self._ptr)
         return Tensor(_ptr=out_ptr)
 
     def __repr__(self):
