@@ -53,6 +53,20 @@ for x, y in dataloader:
 - Python >= 3.7
 - GCC with OpenMP support
 
+### **Cross Compilation**
+
+To compile for Raspberry Pi (AArch64) from an x86 host:
+```bash
+# Install cross-compiler (Debian/Ubuntu)
+sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+# Build using toolchain
+mkdir build-cross && cd build-cross
+cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchain-aarch64.cmake -DUSE_GPU=OFF
+make -j4
+```
+Note: GPU support (`USE_GPU=ON`) requires cross-compiled EGL/GLES libraries in your sysroot.
+
 ### **Quick Installation**
 ```bash
 git clone https://github.com/commandant1/rpl.git
