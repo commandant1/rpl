@@ -163,6 +163,7 @@ bool rpl_gpu_init() {
 
 config_found:;
 
+    printf("DEBUG: calling eglCreateContext...\n"); fflush(stdout);
     const EGLint contextAttribs[] = {
         EGL_CONTEXT_CLIENT_VERSION, 3,
         EGL_NONE
@@ -174,17 +175,23 @@ config_found:;
         return false;
     }
 
+    printf("DEBUG: calling eglMakeCurrent...\n"); fflush(stdout);
     if (!eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context)) {
         fprintf(stderr, "Failed to make context current\n");
         return false;
     }
     
     // Load function pointers
+    printf("DEBUG: loading GL funcs...\n"); fflush(stdout);
     load_gl_funcs();
 
+    printf("DEBUG: check glGetString pointer: %p\n", p_glGetString); fflush(stdout);
     if (p_glGetString) {
-        printf("RPL GPU Initialized: %s\n", p_glGetString(GL_VERSION));
+        printf("DEBUG: calling glGetString...\n"); fflush(stdout);
+        const char* ver = (const char*)p_glGetString(GL_VERSION);
+        printf("RPL GPU Initialized: %s\n", ver);
     }
+    printf("DEBUG: Init complete.\n"); fflush(stdout);
     return true;
 }
 
