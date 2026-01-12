@@ -270,6 +270,80 @@ void tensor_matmul_gpu(Tensor* C, const Tensor* A, const Tensor* B) {
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
+// ===================================
+// Activation Kernels
+// ===================================
+
+static const char* RELU_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 256) in;\n"
+    "layout(std430, binding = 0) readonly buffer Input { float in_data[]; };\n"
+    "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
+    "uniform uint size;\n"
+    "void main() {\n"
+    "    uint id = gl_GlobalInvocationID.x;\n"
+    "    if (id < size) {\n"
+    "        float val = in_data[id];\n"
+    "        out_data[id] = max(val, 0.0);\n"
+    "    }\n"
+    "}\n";
+
+static const char* SIGMOID_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 256) in;\n"
+    "layout(std430, binding = 0) readonly buffer Input { float in_data[]; };\n"
+    "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
+    "uniform uint size;\n"
+    "void main() {\n"
+    "    uint id = gl_GlobalInvocationID.x;\n"
+    "    if (id < size) {\n"
+    "        float val = in_data[id];\n"
+    "        out_data[id] = 1.0 / (1.0 + exp(-val));\n"
+    "    }\n"
+    "}\n";
+
+static GLuint relu_program = 0;
+static GLuint sigmoid_program = 0;
+
+void dispatch_unary_op(Tensor* out, const Tensor* in, GLuint* program_ptr, const char* source) {
+    if (!rpl_gpu_init()) return;
+
+    tensor_to_gpu((Tensor*)in);
+    
+    if (out->device != DEVICE_GPU) {
+        // Assume same shape as input
+        out->dims = in->dims;
+        memcpy(out->shape, in->shape, sizeof(in->shape));
+        out->size = in->size;
+        tensor_to_gpu(out);
+    }
+
+    if (*program_ptr == 0) {
+        *program_ptr = compile_compute_shader(source);
+        if (*program_ptr == 0) return;
+    }
+
+    glUseProgram(*program_ptr);
+
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, in->gpu_buffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, out->gpu_buffer);
+
+    glUniform1ui(glGetUniformLocation(*program_ptr, "size"), out->size);
+
+    GLuint num_groups = (out->size + 255) / 256;
+    glDispatchCompute(num_groups, 1, 1);
+
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+void tensor_relu_gpu(Tensor* out, const Tensor* in) {
+    dispatch_unary_op(out, in, &relu_program, RELU_SHADER_SRC);
+}
+
+void tensor_sigmoid_gpu(Tensor* out, const Tensor* in) {
+    dispatch_unary_op(out, in, &sigmoid_program, SIGMOID_SHADER_SRC);
+}
+
 #else
 
 // Stubs for non-GPU builds
@@ -279,5 +353,7 @@ void tensor_to_gpu(Tensor* t) {}
 void tensor_from_gpu(Tensor* t) {}
 void tensor_add_gpu(Tensor* out, const Tensor* a, const Tensor* b) {}
 void tensor_matmul_gpu(Tensor* C, const Tensor* A, const Tensor* B) {}
+void tensor_relu_gpu(Tensor* out, const Tensor* in) {}
+void tensor_sigmoid_gpu(Tensor* out, const Tensor* in) {}
 
 #endif

@@ -94,6 +94,8 @@ void tensor_to_gpu(Tensor* t);
 void tensor_from_gpu(Tensor* t);
 void tensor_add_gpu(Tensor* out, const Tensor* a, const Tensor* b);
 void tensor_matmul_gpu(Tensor* C, const Tensor* A, const Tensor* B);
+void tensor_relu_gpu(Tensor* out, const Tensor* in);
+void tensor_sigmoid_gpu(Tensor* out, const Tensor* in);
 
 // Initialization
 void tensor_fill(Tensor* t, float value);

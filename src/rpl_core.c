@@ -182,8 +182,39 @@ void tensor_gemm(Tensor* C, const Tensor* A, const Tensor* B,
 // ============================================================
 
 void tensor_relu_inplace(Tensor* t) {
+    uint32_t i = 0;
+    
+    #if RPITORCH_HAS_NEON
+    float32x4_t vzero = vdupq_n_f32(0.0f);
+    // Process in chunks of 4
     #pragma omp parallel for
-    for (uint32_t i = 0; i < t->size; i++) if (t->data[i] < 0) t->data[i] = 0;
+    for (i = 0; i <= t->size - 4; i += 4) {
+        float32x4_t val = vld1q_f32(&t->data[i]);
+        float32x4_t res = vmaxq_f32(val, vzero);
+        vst1q_f32(&t->data[i], res);
+    }
+    // Handle remaining
+    // Note: OpenMP loop above might complicate 'i' handling if not carefully managed.
+    // For simplicity with OMP + SIMD, usually we rely on compiler vectorization or block processing.
+    // Let's do a block-based OMP loop to ensure we can use NEON without race on 'i'.
+    #endif
+
+    #if RPITORCH_HAS_NEON
+        #pragma omp parallel for
+        for (uint32_t base = 0; base < t->size; base += 1024) {
+            uint32_t end = (base + 1024 < t->size) ? base + 1024 : t->size;
+            float32x4_t vzero = vdupq_n_f32(0.0f);
+            uint32_t k = base;
+            for (; k + 4 <= end; k += 4) {
+                 float32x4_t val = vld1q_f32(&t->data[k]);
+                 vst1q_f32(&t->data[k], vmaxq_f32(val, vzero));
+            }
+            for (; k < end; k++) if (t->data[k] < 0) t->data[k] = 0;
+        }
+    #else
+        #pragma omp parallel for
+        for (uint32_t i = 0; i < t->size; i++) if (t->data[i] < 0) t->data[i] = 0;
+    #endif
     
     if (t->requires_grad && !t->backward_fn) {
         t->parent1 = (void*)t;
@@ -203,9 +234,24 @@ void tensor_sigmoid_inplace(Tensor* t) {
 
 Tensor* tensor_relu(const Tensor* t) {
     Tensor* out = tensor_create(t->dims, t->shape, t->requires_grad);
-    #pragma omp parallel for
-    for (uint32_t i = 0; i < t->size; i++) out->data[i] = (t->data[i] > 0) ? t->data[i] : 0;
     
+    #if RPITORCH_HAS_NEON
+        #pragma omp parallel for
+        for (uint32_t base = 0; base < t->size; base += 1024) {
+            uint32_t end = (base + 1024 < t->size) ? base + 1024 : t->size;
+            float32x4_t vzero = vdupq_n_f32(0.0f);
+            uint32_t k = base;
+            for (; k + 4 <= end; k += 4) {
+                 float32x4_t val = vld1q_f32(&t->data[k]);
+                 vst1q_f32(&out->data[k], vmaxq_f32(val, vzero));
+            }
+            for (; k < end; k++) out->data[k] = (t->data[k] > 0) ? t->data[k] : 0;
+        }
+    #else
+        #pragma omp parallel for
+        for (uint32_t i = 0; i < t->size; i++) out->data[i] = (t->data[i] > 0) ? t->data[i] : 0;
+    #endif
+
     if (out->requires_grad) {
         out->parent1 = (void*)t;
         out->backward_fn = backward_relu;

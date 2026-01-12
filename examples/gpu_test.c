@@ -131,6 +131,38 @@ int main() {
     tensor_free(B);
     tensor_free(C);
 
+    // ============================================
+    // Test Activations (ReLU)
+    // ============================================
+    printf("\nTesting GPU ReLU...\n");
+    Tensor* in = tensor_create(2, shapeA, false); // reuse shape
+    Tensor* act_out = tensor_create(2, shapeA, false);
+    
+    // Fill with mix of pos/neg
+    for(int i=0; i<32*32; i++) {
+        in->data[i] = (float)(i - 512); // Range -512 to 512
+    }
+    
+    tensor_relu_gpu(act_out, in);
+    tensor_from_gpu(act_out);
+    
+    bool relu_passed = true;
+    for(int i=0; i<1024; i++) {
+        // Fix test logic: input value wasn't captured correctly
+        float val = (float)(i - 512);
+        float expected = (val > 0) ? val : 0.0f;
+        
+        if (act_out->data[i] != expected) {
+            printf("ReLU Mismatch at %d: in=%f out=%f\n", i, val, act_out->data[i]);
+            relu_passed = false;
+            break;
+        }
+    }
+    if (relu_passed) printf("GPU ReLU verified!\n");
+
+    tensor_free(in);
+    tensor_free(act_out);
+
     rpl_gpu_shutdown();
     return 0;
 }
