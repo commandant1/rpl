@@ -76,8 +76,6 @@ install(FILES include/rpl.h
 )
 
 if(USE_GPU)
-    add_executable(rpl_gpu_test examples/gpu_test.c)
-    target_link_libraries(rpl_gpu_test PRIVATE rpl EGL GLESv2)
     # Only run test if not cross-compiling
     if(NOT CMAKE_CROSSCOMPILING)
         add_test(NAME GPU_Test COMMAND rpl_gpu_test)
