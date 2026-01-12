@@ -59,13 +59,7 @@ static void load_gl_funcs() {
     p_glBindBufferBase = (PFNGLBINDBUFFERBASEPROC)eglGetProcAddress("glBindBufferBase");
     p_glUniform1ui = (PFNGLUNIFORM1UIPROC)eglGetProcAddress("glUniform1ui");
     p_glGetUniformLocation = (PFNGLGETUNIFORMLOCATIONPROC)eglGetProcAddress("glGetUniformLocation");
-    p_glDispatchCompute = (PFNGLDISPATCHCOMPUTEPROC)eglGetProcAddress("glDispatchCompute");
-    p_glMemoryBarrier = (PFNGLMEMORYBARRIERPROC)eglGetProcAddress("glMemoryBarrier");
     p_glGetString = (PFNGLGETSTRINGPROC)eglGetProcAddress("glGetString");
-    
-    printf("Debug: glGetString addr: %p\n", p_glGetString);
-    printf("Debug: glGenBuffers addr: %p\n", p_glGenBuffers);
-    printf("Debug: glDispatchCompute addr: %p\n", p_glDispatchCompute);
 }
 
 // Macro helper to call dynamic pointers
@@ -188,11 +182,9 @@ config_found:;
     // Load function pointers
     load_gl_funcs();
 
-    // if (p_glGetString) {
-    //    printf("RPL GPU Initialized: %s\n", p_glGetString(GL_VERSION));
-    // } else {
-        printf("RPL GPU Initialized (Skipped glGetString)\n");
-    // }
+    if (p_glGetString) {
+        printf("RPL GPU Initialized: %s\n", p_glGetString(GL_VERSION));
+    }
     return true;
 }
 
