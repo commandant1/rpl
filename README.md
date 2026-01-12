@@ -98,6 +98,8 @@ make -j4
 
 - **[Python API Reference](docs/PYTHON_API.md)** - Getting started with Python
 - **[C API Reference](docs/C_API.md)** - Low-level C documentation
+- **[Hardware Guide](docs/HARDWARE.md)** - RPi 4 GPU & Architecture details
+- **[C Training Example](examples/train_xor.c)** - Pure C training loop example
 - **[Examples](examples/)** - Working examples in C and Python
 - **[Performance Guide](docs/COMPARISON.md)** - Benchmarks vs PyTorch/TF
 
