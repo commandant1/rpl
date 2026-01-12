@@ -93,11 +93,31 @@ void tensor_randomize(Tensor* t) {
 }
 
 void tensor_add_out(Tensor* out, const Tensor* a, const Tensor* b) {
-    #pragma omp parallel for
-    for (uint32_t i = 0; i < out->size; i++) {
-        // Support broadcasting for bias: if b is smaller, use i % b->size
-        float val_b = b->data[i % b->size];
-        out->data[i] = a->data[i] + val_b;
+    // If sizes match, we can vectorise easily. If broadcasting, fallback to OMP loop.
+    if (a->size == b->size && out->size == a->size) {
+        #if RPITORCH_HAS_NEON
+        #pragma omp parallel for
+        for (uint32_t base = 0; base < out->size; base += 1024) {
+            uint32_t end = (base + 1024 < out->size) ? base + 1024 : out->size;
+            uint32_t i = base;
+            for (; i + 4 <= end; i += 4) {
+                float32x4_t va = vld1q_f32(&a->data[i]);
+                float32x4_t vb = vld1q_f32(&b->data[i]);
+                vst1q_f32(&out->data[i], vaddq_f32(va, vb));
+            }
+            for (; i < end; i++) out->data[i] = a->data[i] + b->data[i];
+        }
+        #else
+        #pragma omp parallel for
+        for (uint32_t i = 0; i < out->size; i++) out->data[i] = a->data[i] + b->data[i];
+        #endif
+    } else {
+        // Broadcasting path (simpler to keep as OMP only for now)
+        #pragma omp parallel for
+        for (uint32_t i = 0; i < out->size; i++) {
+            float val_b = b->data[i % b->size];
+            out->data[i] = a->data[i] + val_b;
+        }
     }
     
     if (out->requires_grad) {
@@ -115,10 +135,29 @@ Tensor* tensor_add(const Tensor* a, const Tensor* b) {
 }
 
 void tensor_mul_out(Tensor* out, const Tensor* a, const Tensor* b) {
-    #pragma omp parallel for
-    for (uint32_t i = 0; i < out->size; i++) {
-        float val_b = b->data[i % b->size];
-        out->data[i] = a->data[i] * val_b;
+    if (a->size == b->size && out->size == a->size) {
+        #if RPITORCH_HAS_NEON
+        #pragma omp parallel for
+        for (uint32_t base = 0; base < out->size; base += 1024) {
+            uint32_t end = (base + 1024 < out->size) ? base + 1024 : out->size;
+            uint32_t i = base;
+            for (; i + 4 <= end; i += 4) {
+                float32x4_t va = vld1q_f32(&a->data[i]);
+                float32x4_t vb = vld1q_f32(&b->data[i]);
+                vst1q_f32(&out->data[i], vmulq_f32(va, vb));
+            }
+            for (; i < end; i++) out->data[i] = a->data[i] * b->data[i];
+        }
+        #else
+        #pragma omp parallel for
+        for (uint32_t i = 0; i < out->size; i++) out->data[i] = a->data[i] * b->data[i];
+        #endif
+    } else {
+        #pragma omp parallel for
+        for (uint32_t i = 0; i < out->size; i++) {
+            float val_b = b->data[i % b->size];
+            out->data[i] = a->data[i] * val_b;
+        }
     }
     
     if (out->requires_grad) {

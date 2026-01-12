@@ -344,6 +344,54 @@ void tensor_sigmoid_gpu(Tensor* out, const Tensor* in) {
     dispatch_unary_op(out, in, &sigmoid_program, SIGMOID_SHADER_SRC);
 }
 
+// ===================================
+// Tanh & GELU Kernels
+// ===================================
+
+static const char* TANH_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 256) in;\n"
+    "layout(std430, binding = 0) readonly buffer Input { float in_data[]; };\n"
+    "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
+    "uniform uint size;\n"
+    "void main() {\n"
+    "    uint id = gl_GlobalInvocationID.x;\n"
+    "    if (id < size) {\n"
+    "        float val = in_data[id];\n"
+    "        out_data[id] = tanh(val);\n"
+    "    }\n"
+    "}\n";
+
+static const char* GELU_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 256) in;\n"
+    "layout(std430, binding = 0) readonly buffer Input { float in_data[]; };\n"
+    "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
+    "uniform uint size;\n"
+    "void main() {\n"
+    "    uint id = gl_GlobalInvocationID.x;\n"
+    "    if (id < size) {\n"
+    "        float x = in_data[id];\n"
+    "        // Approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))\n"
+    "        const float SQRT_2_OVER_PI = 0.7978845608;\n"
+    "        const float A = 0.044715;\n"
+    "        float inner = SQRT_2_OVER_PI * (x + A * x * x * x);\n"
+    "        float res = 0.5 * x * (1.0 + tanh(inner));\n"
+    "        out_data[id] = res;\n"
+    "    }\n"
+    "}\n";
+
+static GLuint tanh_program = 0;
+static GLuint gelu_program = 0;
+
+void tensor_tanh_gpu(Tensor* out, const Tensor* in) {
+    dispatch_unary_op(out, in, &tanh_program, TANH_SHADER_SRC);
+}
+
+void tensor_gelu_gpu(Tensor* out, const Tensor* in) {
+    dispatch_unary_op(out, in, &gelu_program, GELU_SHADER_SRC);
+}
+
 #else
 
 // Stubs for non-GPU builds
@@ -355,5 +403,7 @@ void tensor_add_gpu(Tensor* out, const Tensor* a, const Tensor* b) {}
 void tensor_matmul_gpu(Tensor* C, const Tensor* A, const Tensor* B) {}
 void tensor_relu_gpu(Tensor* out, const Tensor* in) {}
 void tensor_sigmoid_gpu(Tensor* out, const Tensor* in) {}
+void tensor_tanh_gpu(Tensor* out, const Tensor* in) {}
+void tensor_gelu_gpu(Tensor* out, const Tensor* in) {}
 
 #endif
