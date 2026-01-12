@@ -66,24 +66,34 @@ bool rpl_gpu_init() {
         EGL_NONE
     };
     
-    // Strategy 3: No Surface Type specified (Absolute fallback)
-    EGLint configAttribsAny[] = {
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-        EGL_NONE
-    };
-
-    if (eglChooseConfig(display, configAttribs8888, &config, 1, &numConfigs) && numConfigs > 0) {
-        printf("RPL GPU: Selected RGBA8888 PBuffer Config\n");
-    } else if (eglChooseConfig(display, configAttribsMin, &config, 1, &numConfigs) && numConfigs > 0) {
-        printf("RPL GPU: Selected Minimal PBuffer Config\n");
-    } else if (eglChooseConfig(display, configAttribsAny, &config, 1, &numConfigs) && numConfigs > 0) {
-        printf("RPL GPU: Selected Generic Config\n");
-    } else {
-        fprintf(stderr, "Failed to choose EGL config for GLES 3.0+\n");
-        fprintf(stderr, "NumConfigs found: %d\n", numConfigs);
-        fprintf(stderr, "EGL Error: 0x%x\n", eglGetError());
-        return false;
+    // Strategy 3: Manual Iteration (Brute Force)
+    // If eglChooseConfig fails or returns 0, let's just get ALL configs and inspect them
+    EGLConfig* all_configs;
+    EGLint num_total_configs;
+    if (eglGetConfigs(display, NULL, 0, &num_total_configs) && num_total_configs > 0) {
+        all_configs = (EGLConfig*)malloc(num_total_configs * sizeof(EGLConfig));
+        eglGetConfigs(display, all_configs, num_total_configs, &num_total_configs);
+        
+        for (int i = 0; i < num_total_configs; i++) {
+            EGLint renderable;
+            eglGetConfigAttrib(display, all_configs[i], EGL_RENDERABLE_TYPE, &renderable);
+            if (renderable & EGL_OPENGL_ES3_BIT) {
+                printf("RPL GPU: Found GLES3 compatible config via manual search (Index %d)\n", i);
+                config = all_configs[i];
+                numConfigs = 1; // Mark as found
+                free(all_configs);
+                goto config_found;
+            }
+        }
+        free(all_configs);
     }
+    
+    // Failed all strategies
+    fprintf(stderr, "Failed to find ANY EGL config with EGL_OPENGL_ES3_BIT.\n");
+    fprintf(stderr, "EGL Error: 0x%x\n", eglGetError());
+    return false;
+
+config_found:;
 
     const EGLint contextAttribs[] = {
         EGL_CONTEXT_CLIENT_VERSION, 3,
