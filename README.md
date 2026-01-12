@@ -53,9 +53,22 @@ for x, y in dataloader:
 - Python >= 3.7
 - GCC with OpenMP support
 
-### **Building from Source**
+### **Quick Installation**
 ```bash
-git clone https://github.com/yourusername/rpl.git
+git clone https://github.com/commandant1/rpl.git
+cd rpl
+chmod +x install.sh
+./install.sh
+```
+
+Alternatively, install via pip:
+```bash
+pip install .
+```
+
+### **Manual Building from Source**
+```bash
+git clone https://github.com/commandant1/rpl.git
 cd rpl
 mkdir build && cd build
 cmake ..
