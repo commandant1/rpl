@@ -17,6 +17,15 @@ extern "C" {
 #endif
 
 // ============================================================
+// Device Management
+// ============================================================
+
+typedef enum {
+    DEVICE_CPU,
+    DEVICE_GPU
+} DeviceType;
+
+// ============================================================
 // Configuration & Feature Detection
 // ============================================================
 
@@ -32,6 +41,7 @@ extern "C" {
 #else
     #define RPITORCH_HAS_NEON 0
 #endif
+
 
 #ifdef USE_OPENBLAS
     #define RPITORCH_HAS_BLAS 1
@@ -57,6 +67,9 @@ typedef struct Tensor {
     void* _allocation;
     size_t _alloc_size;
     
+    DeviceType device;
+    uint32_t gpu_buffer;  // OpenGL Buffer Object ID
+    
     // Autograd
     bool is_leaf;
     struct Tensor* parent1;
@@ -73,6 +86,13 @@ Tensor* tensor_create(uint32_t dims, const uint32_t* shape, bool requires_grad);
 void tensor_free(Tensor* t);
 void* rpitorch_aligned_alloc(size_t alignment, size_t size);
 void rpitorch_aligned_free(void* ptr);
+
+// GPU Operations
+bool rpl_gpu_init();
+void rpl_gpu_shutdown();
+void tensor_to_gpu(Tensor* t);
+void tensor_from_gpu(Tensor* t);
+void tensor_add_gpu(Tensor* out, const Tensor* a, const Tensor* b);
 
 // Initialization
 void tensor_fill(Tensor* t, float value);

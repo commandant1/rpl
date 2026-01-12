@@ -1,0 +1,93 @@
+#include "rpl.h"
+#include <stdio.h>
+#include <assert.h>
+
+int main() {
+    printf("Testing RPL GPU Backend...\n");
+
+    if (!rpl_gpu_init()) {
+        printf("GPU not available or failed to initialize.\n");
+        return 1;
+    }
+
+    uint32_t shape[] = {1024};
+    Tensor* t = tensor_create(1, shape, false);
+    
+    // Fill with data
+    for (int i = 0; i < 1024; i++) {
+        t->data[i] = (float)i;
+    }
+
+    printf("Original data (first 5): %f %f %f %f %f\n", 
+           t->data[0], t->data[1], t->data[2], t->data[3], t->data[4]);
+
+    // Move to GPU
+    printf("Moving to GPU...\n");
+    tensor_to_gpu(t);
+    
+    // Check if it's marked as on GPU
+    if (t->device == DEVICE_GPU) {
+        printf("Tensor is now on GPU (Buffer ID: %u)\n", t->gpu_buffer);
+    } else {
+        printf("Failed to move tensor to GPU\n");
+        return 1;
+    }
+
+    // Clear CPU data to prove we download it back
+    // (Note: In a shared memory system like Pi this might not be strictly necessary if mapped, 
+    // but good for verification)
+    for (int i = 0; i < 1024; i++) {
+        t->data[i] = 0.0f;
+    }
+
+    // Move back to CPU
+    printf("Moving back from GPU...\n");
+    tensor_from_gpu(t);
+
+    printf("Restored data (first 5): %f %f %f %f %f\n", 
+           t->data[0], t->data[1], t->data[2], t->data[3], t->data[4]);
+
+    // Verify
+    for (int i = 0; i < 1024; i++) {
+        if (t->data[i] != (float)i) {
+            printf("Mismatch at index %d: expected %f, got %f\n", i, (float)i, t->data[i]);
+            return 1;
+        }
+    }
+    printf("Data integrity verified!\n");
+
+    // ============================================
+    // Test Addition
+    // ============================================
+    printf("\nTesting GPU Addition...\n");
+    Tensor* t2 = tensor_create(1, shape, false);
+    for(int i=0; i<1024; i++) t2->data[i] = 10.0f;
+
+    Tensor* out = tensor_create(1, shape, false);
+    
+    // warm up / alloc
+    tensor_to_gpu(t);
+    tensor_to_gpu(t2);
+    
+    tensor_add_gpu(out, t, t2);
+
+    tensor_from_gpu(out);
+
+    printf("Result data (first 5): %f %f %f %f %f\n", 
+           out->data[0], out->data[1], out->data[2], out->data[3], out->data[4]);
+
+    for (int i = 0; i < 1024; i++) {
+        float expected = (float)i + 10.0f;
+        if (out->data[i] != expected) {
+            printf("Add Mismatch at index %d: expected %f, got %f\n", i, expected, out->data[i]);
+            return 1;
+        }
+    }
+    printf("GPU Addition verified!\n");
+
+    tensor_free(t);
+    tensor_free(t2);
+    tensor_free(out);
+    rpl_gpu_shutdown();
+    return 0;
+}

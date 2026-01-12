@@ -12,6 +12,13 @@ if(USE_OPENBLAS)
     set(LIBS ${LIBS} ${OpenBLAS_LIBRARIES})
 endif()
 
+# Optional: GPU Support (for Raspberry Pi 4 VideoCore VI)
+option(USE_GPU "Enable GPU support using GLES Compute Shaders" ON)
+if(USE_GPU)
+    add_definitions(-DUSE_GPU)
+    set(LIBS ${LIBS} EGL GLESv2)
+endif()
+
 # Header directories
 include_directories(include)
 
@@ -32,6 +39,7 @@ set(SOURCES
     src/conv_winograd.c
     src/gemm_optimized.c
     src/probabilistic.c
+    src/rpl_gpu.c
 )
 
 # Shared library
@@ -49,3 +57,8 @@ install(TARGETS rpl rpl_static
 install(FILES include/rpl.h
     DESTINATION include
 )
+
+if(USE_GPU)
+    add_executable(rpl_gpu_test examples/gpu_test.c)
+    target_link_libraries(rpl_gpu_test rpl ${LIBS})
+endif()
