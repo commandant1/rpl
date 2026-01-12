@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+bin/
+lib/
+*.so
+*.a
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+
+# Samples/Data
+*.pkl
+batch_*.json
+training_metrics.json
+final_model.pkl
+
+# System
+.DS_Store

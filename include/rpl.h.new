@@ -1,0 +1,287 @@
+/*
+ * RPL - RPI Learn
+ * A lightweight, pure C machine learning library for Raspberry Pi 4
+ * 
+ * Clean, memorable API design
+ */
+
+#ifndef RPL_H
+#define RPL_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// ============================================================
+// CORE TENSOR OPERATIONS
+// ============================================================
+
+typedef struct Tensor Tensor;
+
+// Tensor creation & management (simplified names)
+Tensor* create(uint32_t dims, const uint32_t* shape, bool requires_grad);
+Tensor* zeros(uint32_t dims, const uint32_t* shape);
+Tensor* ones(uint32_t dims, const uint32_t* shape);
+Tensor* randn(uint32_t dims, const uint32_t* shape);
+void free_tensor(Tensor* t);
+
+// Math operations (clean names)
+Tensor* matmul(const Tensor* a, const Tensor* b);
+Tensor* add(const Tensor* a, const Tensor* b);
+Tensor* sub(const Tensor* a, const Tensor* b);
+Tensor* mul(const Tensor* a, const Tensor* b);
+Tensor* div_tensor(const Tensor* a, const Tensor* b);
+
+// In-place operations
+void add_inplace(Tensor* a, const Tensor* b);
+void mul_inplace(Tensor* a, float scalar);
+void fill(Tensor* t, float value);
+
+// Activations (short names)
+void relu(Tensor* t);
+void sigmoid(Tensor* t);
+void tanh_tensor(Tensor* t);
+void gelu(Tensor* t);
+void softmax(Tensor* t);
+
+Tensor* leaky_relu(const Tensor* input, float alpha);
+Tensor* elu(const Tensor* input, float alpha);
+Tensor* swish(const Tensor* input);
+Tensor* softplus(const Tensor* input);
+
+// ============================================================
+// NEURAL NETWORK LAYERS
+// ============================================================
+
+typedef struct Linear Linear;
+typedef struct Conv2d Conv2d;
+typedef struct Conv3d Conv3d;
+typedef struct LSTM LSTM;
+typedef struct GRU GRU;
+typedef struct BatchNorm BatchNorm;
+typedef struct LayerNorm LayerNorm;
+typedef struct Embedding Embedding;
+typedef struct Dropout Dropout;
+
+// Linear layer
+Linear* linear(uint32_t in_features, uint32_t out_features);
+Tensor* linear_forward(Linear* layer, const Tensor* input);
+
+// Convolution
+Conv2d* conv2d(uint32_t in_ch, uint32_t out_ch, uint32_t kernel, uint32_t stride, uint32_t padding);
+Tensor* conv2d_forward(Conv2d* layer, const Tensor* input);
+
+Conv3d* conv3d(uint32_t in_ch, uint32_t out_ch, uint32_t k_d, uint32_t k_h, uint32_t k_w);
+Tensor* conv3d_forward(Conv3d* layer, const Tensor* input);
+
+// Recurrent
+LSTM* lstm(uint32_t input_size, uint32_t hidden_size, uint32_t num_layers);
+Tensor* lstm_forward(LSTM* layer, const Tensor* input, Tensor** hidden_state);
+
+GRU* gru(uint32_t input_size, uint32_t hidden_size, uint32_t num_layers);
+Tensor* gru_forward(GRU* layer, const Tensor* input);
+
+// Normalization
+BatchNorm* batchnorm(uint32_t num_features);
+Tensor* batchnorm_forward(BatchNorm* layer, const Tensor* input, bool training);
+
+LayerNorm* layernorm(uint32_t normalized_shape, float eps);
+Tensor* layernorm_forward(LayerNorm* layer, const Tensor* input);
+
+// Embedding
+Embedding* embedding(uint32_t num_embeddings, uint32_t embedding_dim);
+Tensor* embedding_forward(Embedding* layer, const uint32_t* indices, uint32_t num_indices);
+
+// Dropout
+Dropout* dropout(float p);
+Tensor* dropout_forward(Dropout* layer, const Tensor* input, bool training);
+
+// ============================================================
+// ATTENTION & TRANSFORMERS
+// ============================================================
+
+typedef struct Attention Attention;
+typedef struct MultiHeadAttention MultiHeadAttention;
+typedef struct PositionalEncoding PositionalEncoding;
+
+// Attention mechanisms
+Tensor* attention(const Tensor* Q, const Tensor* K, const Tensor* V, const Tensor* mask);
+Tensor* cross_attention(const Tensor* Q, const Tensor* K, const Tensor* V);
+
+MultiHeadAttention* multi_head_attention(uint32_t d_model, uint32_t num_heads, float dropout);
+Tensor* mha_forward(MultiHeadAttention* mha, const Tensor* input);
+
+PositionalEncoding* positional_encoding(uint32_t max_len, uint32_t d_model);
+Tensor* pos_encoding_forward(PositionalEncoding* pe, const Tensor* input);
+
+// ============================================================
+// OPTIMIZERS (simplified names)
+// ============================================================
+
+typedef struct Optimizer Optimizer;
+
+Optimizer* sgd(Tensor** params, uint32_t n, float lr, float momentum);
+Optimizer* adam(Tensor** params, uint32_t n, float lr);
+Optimizer* adamw(Tensor** params, uint32_t n, float lr, float wd);
+Optimizer* rmsprop(Tensor** params, uint32_t n, float lr);
+Optimizer* adagrad(Tensor** params, uint32_t n, float lr);
+Optimizer* lamb(Tensor** params, uint32_t n, float lr);
+
+void step(Optimizer* opt);
+void zero_grad(Optimizer* opt);
+void free_optimizer(Optimizer* opt);
+
+// ============================================================
+// LOSS FUNCTIONS
+// ============================================================
+
+float mse_loss(const Tensor* pred, const Tensor* target);
+float cross_entropy(const Tensor* pred, const Tensor* target);
+float bce_loss(const Tensor* pred, const Tensor* target);
+float focal_loss(const Tensor* pred, const Tensor* target, float alpha, float gamma);
+float triplet_loss(const Tensor* anchor, const Tensor* pos, const Tensor* neg, float margin);
+
+// ============================================================
+// CLASSICAL ML
+// ============================================================
+
+typedef struct KMeans KMeans;
+typedef struct PCA PCA;
+typedef struct LogisticRegression LogisticRegression;
+typedef struct SVM SVM;
+typedef struct NaiveBayes NaiveBayes;
+typedef struct DBSCAN DBSCAN;
+
+// Clustering
+KMeans* kmeans(uint32_t n_clusters, uint32_t max_iters);
+void kmeans_fit(KMeans* km, const float* X, uint32_t n_samples, uint32_t n_features);
+void kmeans_predict(const KMeans* km, const float* X, uint32_t n_samples, uint32_t* labels);
+
+DBSCAN* dbscan(float eps, uint32_t min_samples);
+void dbscan_fit(DBSCAN* db, const float* X, uint32_t n_samples, uint32_t n_features);
+
+// Classification
+LogisticRegression* logistic_regression(uint32_t n_features, uint32_t n_classes);
+void logreg_fit(LogisticRegression* lr, const float* X, const uint32_t* y, uint32_t n_samples);
+void logreg_predict(const LogisticRegression* lr, const float* X, uint32_t n_samples, uint32_t* y_pred);
+
+SVM* svm(float C, float gamma);
+void svm_fit(SVM* svm, const float* X, const float* y, uint32_t n_samples, uint32_t n_features);
+void svm_predict(const SVM* svm, const float* X, uint32_t n_samples, float* y_pred);
+
+NaiveBayes* naive_bayes();
+void nb_fit(NaiveBayes* nb, const float* X, const uint32_t* y, uint32_t n_samples, uint32_t n_features, uint32_t n_classes);
+void nb_predict(const NaiveBayes* nb, const float* X, uint32_t n_samples, uint32_t* y_pred);
+
+// Dimensionality reduction
+PCA* pca(uint32_t n_components);
+void pca_fit(PCA* pca, const float* X, uint32_t n_samples, uint32_t n_features);
+void pca_transform(const PCA* pca, const float* X, uint32_t n_samples, float* X_transformed);
+
+// ============================================================
+// METRICS & EVALUATION
+// ============================================================
+
+float accuracy(const uint32_t* y_true, const uint32_t* y_pred, uint32_t n);
+float f1_score(const uint32_t* y_true, const uint32_t* y_pred, uint32_t n, uint32_t n_classes);
+float roc_auc(const float* y_true, const float* y_score, uint32_t n);
+float r2_score(const float* y_true, const float* y_pred, uint32_t n);
+
+void confusion_matrix(const uint32_t* y_true, const uint32_t* y_pred, uint32_t n, uint32_t n_classes, uint32_t* matrix);
+void print_confusion_matrix(const uint32_t* matrix, uint32_t n_classes);
+
+// ============================================================
+// DATA LOADING
+// ============================================================
+
+typedef struct DataLoader DataLoader;
+
+DataLoader* dataloader(const float* X, const float* y, uint32_t n_samples, 
+                      uint32_t batch_size, bool shuffle);
+bool dataloader_next(DataLoader* dl, float** batch_X, float** batch_y);
+void free_dataloader(DataLoader* dl);
+
+// ============================================================
+// TRAINING UTILITIES
+// ============================================================
+
+typedef struct LRScheduler LRScheduler;
+typedef struct EarlyStopping EarlyStopping;
+
+// Learning rate scheduling
+LRScheduler* lr_scheduler_step(Optimizer* opt, uint32_t step_size, float gamma);
+LRScheduler* lr_scheduler_cosine(Optimizer* opt, uint32_t T_max);
+void lr_step(LRScheduler* sched);
+
+// Early stopping
+EarlyStopping* early_stopping(uint32_t patience, float min_delta);
+bool should_stop(EarlyStopping* es, uint32_t epoch, float metric);
+
+// Gradient clipping
+float clip_grad_norm(Tensor** params, uint32_t n, float max_norm);
+
+// ============================================================
+// QUANTIZATION
+// ============================================================
+
+typedef struct QuantConfig QuantConfig;
+
+QuantConfig* quant_config(bool symmetric, bool per_channel);
+void quantize_tensor(Tensor* t, QuantConfig* config);
+void dequantize_tensor(Tensor* t);
+
+// ============================================================
+// VISION-SPECIFIC
+// ============================================================
+
+typedef struct ResBlock ResBlock;
+typedef struct SEBlock SEBlock;
+
+ResBlock* resblock(uint32_t in_ch, uint32_t out_ch, uint32_t stride);
+Tensor* resblock_forward(ResBlock* block, const Tensor* input, bool training);
+
+SEBlock* se_block(uint32_t channels, uint32_t reduction);
+Tensor* se_forward(SEBlock* block, const Tensor* input);
+
+// Object detection utilities
+void nms(const float* boxes, const float* scores, uint32_t n_boxes, 
+         float iou_threshold, uint32_t* keep, uint32_t* n_keep);
+
+// ============================================================
+// REINFORCEMENT LEARNING
+// ============================================================
+
+typedef struct QNetwork QNetwork;
+typedef struct ReplayBuffer ReplayBuffer;
+typedef struct ActorCritic ActorCritic;
+
+QNetwork* q_network(uint32_t state_dim, uint32_t action_dim, uint32_t hidden_dim);
+Tensor* q_forward(QNetwork* qnet, const Tensor* state);
+uint32_t select_action(QNetwork* qnet, const Tensor* state, float epsilon);
+
+ReplayBuffer* replay_buffer(uint32_t capacity, uint32_t state_dim);
+void replay_push(ReplayBuffer* rb, const float* state, uint32_t action, float reward, const float* next_state, bool done);
+
+ActorCritic* actor_critic(uint32_t state_dim, uint32_t action_dim, uint32_t hidden_dim);
+
+// ============================================================
+// UTILITIES
+// ============================================================
+
+void set_seed(uint32_t seed);
+void enable_neon(bool enable);
+void enable_openblas(bool enable);
+void set_num_threads(uint32_t n);
+
+// Model save/load
+void save_model(const char* filename, Tensor** params, uint32_t n);
+void load_model(const char* filename, Tensor** params, uint32_t n);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // RPL_H
