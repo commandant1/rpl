@@ -44,15 +44,37 @@ bool rpl_gpu_init() {
     }
     
     // ... rest of config code
-    EGLint configAttribs[] = {
+    // Try a few different config strategies
+    EGLConfig config;
+    EGLint numConfigs = 0;
+    
+    // Strategy 1: Explicit 8-bit RGBA
+    EGLint configAttribs8888[] = {
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
+        EGL_NONE
+    };
+    
+    // Strategy 2: Minimal ES3
+    EGLint configAttribsMin[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
         EGL_NONE
     };
 
-    EGLConfig config;
-    EGLint numConfigs;
-    if (!eglChooseConfig(display, configAttribs, &config, 1, &numConfigs) || numConfigs == 0) {
+    if (eglChooseConfig(display, configAttribs8888, &config, 1, &numConfigs) && numConfigs > 0) {
+        // Success with 8888
+    } else if (eglChooseConfig(display, configAttribsMin, &config, 1, &numConfigs) && numConfigs > 0) {
+        // Success with minimal
+        printf("RPL GPU: Using minimal EGL config fallback.\n");
+    } else {
+        // Fallback: Try removing ES3 bit just to see (though we need it later)
+        // Actually, if we can't get ES3, we can't run.
         fprintf(stderr, "Failed to choose EGL config for GLES 3.0+\n");
+        // Dump error code
+        fprintf(stderr, "EGL Error: 0x%x\n", eglGetError());
         return false;
     }
 
