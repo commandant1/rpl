@@ -10,7 +10,10 @@ Clean Python API • Optimized C Core • ARM NEON SIMD • Autograd • Quantiz
 
 RPL (RPI Learn) is a hybrid machine learning framework designed for the Raspberry Pi 4. It combines the ease of use of a PyTorch-like Python API with the performance of a pure C core optimized for ARM architecture.
 
-- **Fast**: Hand-tuned ARM NEON SIMD kernels and OpenMP multi-threading.
+- **Optimized for RPi 4**: Hand-tuned for Cortex-A72 (NEON) and VideoCore VI GPU (GLES Compute).
+- **GPU Acceleration**: Matrix multiplication and activations run on the VideoCore VI GPU. [See Hardware Details](docs/HARDWARE.md).
+- **Lightweight**: Minimum dependencies (OpenBLAS, optional).
+ti-threading.
 - **Python-First**: Familiar API for rapid prototyping.
 - **Production-Ready**: Export models to standalone C code for zero-overhead deployment.
 - **Complete**: Supports Transformers, CNNs, classical algorithms (SVM, KMeans), and RL.
