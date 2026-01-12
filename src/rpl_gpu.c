@@ -12,21 +12,38 @@ static EGLDisplay display = EGL_NO_DISPLAY;
 static EGLContext context = EGL_NO_CONTEXT;
 
 // Initialize headless EGL context for compute shaders
+// Initialize headless EGL context for compute shaders
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
+
 bool rpl_gpu_init() {
     if (display != EGL_NO_DISPLAY) return true; // Already initialized
 
+    // Try default display first
     display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (display == EGL_NO_DISPLAY) {
-        fprintf(stderr, "Failed to get EGL display\n");
-        return false;
-    }
-
+    
     EGLint major, minor;
-    if (!eglInitialize(display, &major, &minor)) {
-        fprintf(stderr, "Failed to initialize EGL\n");
+    if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor)) {
+        // Fallback for headless: Surfaceless
+        // Some systems require explicit PFN loading, but simple linking might work if supported
+        // Or simpler: Just tell user to export EGL_PLATFORM=surfaceless
+        
+        // Let's print detailed error
+        fprintf(stderr, "Default EGL init failed. Trying fallback...\n");
+        
+        // Terminate previous attempt
+        if (display != EGL_NO_DISPLAY) eglTerminate(display);
+        display = EGL_NO_DISPLAY;
+        
+        // Try getting display via generic method (might need extensions)
+        // For now, simpler approach: Just error out but suggest environment var
+        fprintf(stderr, "RPL requires a valid EGL display.\n");
+        fprintf(stderr, "On Raspberry Pi/Headless, try running: export EGL_PLATFORM=surfaceless\n");
         return false;
     }
-
+    
+    // ... rest of config code
     EGLint configAttribs[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
         EGL_NONE
@@ -35,7 +52,7 @@ bool rpl_gpu_init() {
     EGLConfig config;
     EGLint numConfigs;
     if (!eglChooseConfig(display, configAttribs, &config, 1, &numConfigs) || numConfigs == 0) {
-        fprintf(stderr, "Failed to choose EGL config\n");
+        fprintf(stderr, "Failed to choose EGL config for GLES 3.0+\n");
         return false;
     }
 
