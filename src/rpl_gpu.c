@@ -188,11 +188,11 @@ config_found:;
     // Load function pointers
     load_gl_funcs();
 
-    if (p_glGetString) {
-        printf("RPL GPU Initialized: %s\n", p_glGetString(GL_VERSION));
-    } else {
-        printf("RPL GPU Initialized (Function loading failed?)\n");
-    }
+    // if (p_glGetString) {
+    //    printf("RPL GPU Initialized: %s\n", p_glGetString(GL_VERSION));
+    // } else {
+        printf("RPL GPU Initialized (Skipped glGetString)\n");
+    // }
     return true;
 }
 
