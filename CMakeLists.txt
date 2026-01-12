@@ -40,6 +40,7 @@ set(SOURCES
     src/gemm_optimized.c
     src/probabilistic.c
     src/rpl_gpu.c
+    src/rpl_half.c
 )
 
 # Shared library

@@ -77,6 +77,20 @@ typedef struct Tensor {
     void (*backward_fn)(struct Tensor*);
 } Tensor;
 
+typedef uint16_t rpl_half;
+
+typedef struct HalfTensor {
+    rpl_half* data;
+    uint32_t dims;
+    uint32_t shape[MAX_DIMS];
+    uint32_t strides[MAX_DIMS];
+    uint32_t size;
+    
+    void* _allocation;
+    DeviceType device;
+    uint32_t gpu_buffer;
+} HalfTensor;
+
 // ============================================================
 // Tensor Operations
 // ============================================================
@@ -98,6 +112,11 @@ void tensor_relu_gpu(Tensor* out, const Tensor* in);
 void tensor_sigmoid_gpu(Tensor* out, const Tensor* in);
 void tensor_tanh_gpu(Tensor* out, const Tensor* in);
 void tensor_gelu_gpu(Tensor* out, const Tensor* in);
+
+// Half Precision
+HalfTensor* tensor_to_half(const Tensor* t);
+Tensor* tensor_from_half(const HalfTensor* t);
+void half_tensor_free(HalfTensor* t);
 
 // Initialization
 void tensor_fill(Tensor* t, float value);
