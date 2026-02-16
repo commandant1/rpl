@@ -84,8 +84,10 @@ QuantizedTensor* tensor_quantize_int8_symmetric(const Tensor* input) {
         float32x4_t vmin = vdupq_n_f32(FLT_MAX);
         float32x4_t vmax = vdupq_n_f32(-FLT_MAX);
         
+        uint32_t n_vec = input->size / 4;
         #pragma omp for nowait
-        for (uint32_t i = 0; i + 4 <= input->size; i += 4) {
+        for (uint32_t iv = 0; iv < n_vec; iv++) {
+            uint32_t i = iv * 4;
             float32x4_t v = vld1q_f32(&input->data[i]);
             vmin = vminq_f32(vmin, v);
             vmax = vmaxq_f32(vmax, v);
