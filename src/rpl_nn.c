@@ -126,46 +126,107 @@ Conv2dLayer* conv2d_create(uint32_t in_channels, uint32_t out_channels,
 }
 
 Tensor* conv2d_forward(Conv2dLayer* layer, const Tensor* input) {
-    // Simplified conv2d - assumes implementation exists in core
+    // Conv2D via im2col + GEMM for high performance
     // input: [batch, in_channels, height, width]
     uint32_t batch = input->shape[0];
     uint32_t in_h = input->shape[2];
     uint32_t in_w = input->shape[3];
+    uint32_t ks = layer->kernel_size;
     
-    uint32_t out_h = (in_h + 2 * layer->padding - layer->kernel_size) / layer->stride + 1;
-    uint32_t out_w = (in_w + 2 * layer->padding - layer->kernel_size) / layer->stride + 1;
+    uint32_t out_h = (in_h + 2 * layer->padding - ks) / layer->stride + 1;
+    uint32_t out_w = (in_w + 2 * layer->padding - ks) / layer->stride + 1;
     
     uint32_t output_shape[4] = {batch, layer->out_channels, out_h, out_w};
     Tensor* output = tensor_create(4, output_shape, input->requires_grad);
-    tensor_fill(output, 0.0f);
     
-    // Simplified convolution implementation
-    #pragma omp parallel for collapse(4)
-    for (uint32_t b = 0; b < batch; b++) {
-        for (uint32_t oc = 0; oc < layer->out_channels; oc++) {
-            for (uint32_t oh = 0; oh < out_h; oh++) {
-                for (uint32_t ow = 0; ow < out_w; ow++) {
-                    float sum = layer->bias->data[oc];
-                    
+    // Use Winograd for 3x3, stride=1, padding=1 (optimal case)
+    if (ks == 3 && layer->stride == 1 && layer->padding == 1) {
+        #pragma omp parallel for
+        for (uint32_t b = 0; b < batch; b++) {
+            conv2d_winograd_3x3(
+                &input->data[b * layer->in_channels * in_h * in_w],
+                layer->weight->data,
+                &output->data[b * layer->out_channels * out_h * out_w],
+                layer->in_channels, layer->out_channels,
+                in_h, in_w, layer->stride, layer->padding
+            );
+            // Add bias
+            for (uint32_t oc = 0; oc < layer->out_channels; oc++) {
+                float bias_val = layer->bias->data[oc];
+                float* out_channel = &output->data[(b * layer->out_channels + oc) * out_h * out_w];
+                for (uint32_t i = 0; i < out_h * out_w; i++) {
+                    out_channel[i] += bias_val;
+                }
+            }
+        }
+        return output;
+    }
+    
+    // General case: im2col + GEMM
+    // im2col buffer: [in_channels * ks * ks, out_h * out_w]
+    uint32_t col_size = layer->in_channels * ks * ks * out_h * out_w;
+    
+    #pragma omp parallel
+    {
+        float* col_buf = (float*)rpitorch_aligned_alloc(64, col_size * sizeof(float));
+        
+        #pragma omp for
+        for (uint32_t b = 0; b < batch; b++) {
+            const float* in_b = &input->data[b * layer->in_channels * in_h * in_w];
+            float* out_b = &output->data[b * layer->out_channels * out_h * out_w];
+            
+            // im2col: flatten input patches into columns
+            uint32_t col_idx = 0;
+            for (uint32_t oy = 0; oy < out_h; oy++) {
+                for (uint32_t ox = 0; ox < out_w; ox++) {
                     for (uint32_t ic = 0; ic < layer->in_channels; ic++) {
-                        for (uint32_t kh = 0; kh < layer->kernel_size; kh++) {
-                            for (uint32_t kw = 0; kw < layer->kernel_size; kw++) {
-                                int32_t ih = oh * layer->stride + kh - layer->padding;
-                                int32_t iw = ow * layer->stride + kw - layer->padding;
+                        for (uint32_t ky = 0; ky < ks; ky++) {
+                            for (uint32_t kx = 0; kx < ks; kx++) {
+                                int32_t iy = oy * layer->stride + ky - layer->padding;
+                                int32_t ix = ox * layer->stride + kx - layer->padding;
                                 
-                                if (ih >= 0 && ih < (int32_t)in_h && iw >= 0 && iw < (int32_t)in_w) {
-                                    sum += input->data[((b * layer->in_channels + ic) * in_h + ih) * in_w + iw] *
-                                          layer->weight->data[((oc * layer->in_channels + ic) * layer->kernel_size + kh) * 
-                                                             layer->kernel_size + kw];
+                                uint32_t row = ic * ks * ks + ky * ks + kx;
+                                uint32_t col = oy * out_w + ox;
+                                
+                                if (iy >= 0 && iy < (int32_t)in_h && ix >= 0 && ix < (int32_t)in_w) {
+                                    col_buf[row * out_h * out_w + col] = in_b[ic * in_h * in_w + iy * in_w + ix];
+                                } else {
+                                    col_buf[row * out_h * out_w + col] = 0.0f;
                                 }
                             }
                         }
                     }
-                    
-                    output->data[((b * layer->out_channels + oc) * out_h + oh) * out_w + ow] = sum;
                 }
             }
+            
+            // GEMM: weight[out_ch, in_ch*ks*ks] @ col_buf[in_ch*ks*ks, out_h*out_w]
+            uint32_t M = layer->out_channels;
+            uint32_t K_gemm = layer->in_channels * ks * ks;
+            uint32_t N_gemm = out_h * out_w;
+            
+            memset(out_b, 0, M * N_gemm * sizeof(float));
+            parallel_gemm_optimized(layer->weight->data, col_buf, out_b, M, N_gemm, K_gemm);
+            
+            // Add bias
+            for (uint32_t oc = 0; oc < layer->out_channels; oc++) {
+                float bias_val = layer->bias->data[oc];
+#if RPITORCH_HAS_NEON
+                float32x4_t vbias = vdupq_n_f32(bias_val);
+                uint32_t i = 0;
+                for (; i + 4 <= out_h * out_w; i += 4) {
+                    float32x4_t v = vld1q_f32(&out_b[oc * out_h * out_w + i]);
+                    vst1q_f32(&out_b[oc * out_h * out_w + i], vaddq_f32(v, vbias));
+                }
+                for (; i < out_h * out_w; i++) out_b[oc * out_h * out_w + i] += bias_val;
+#else
+                for (uint32_t i = 0; i < out_h * out_w; i++) {
+                    out_b[oc * out_h * out_w + i] += bias_val;
+                }
+#endif
+            }
         }
+        
+        rpitorch_aligned_free(col_buf);
     }
     
     return output;
@@ -269,29 +330,93 @@ Tensor* layer_norm_forward(LayerNormLayer* layer, const Tensor* input) {
     Tensor* output = tensor_create(input->dims, input->shape, input->requires_grad);
     
     uint32_t batch_size = input->size / layer->normalized_shape;
+    uint32_t norm_shape = layer->normalized_shape;
+    float inv_norm = 1.0f / norm_shape;
     
     #pragma omp parallel for
     for (uint32_t b = 0; b < batch_size; b++) {
-        float* data = &input->data[b * layer->normalized_shape];
-        float* out = &output->data[b * layer->normalized_shape];
+        const float* data = &input->data[b * norm_shape];
+        float* out = &output->data[b * norm_shape];
+        const float* weight = layer->weight->data;
+        const float* bias = layer->bias->data;
         
-        float mean = 0.0f;
-        for (uint32_t i = 0; i < layer->normalized_shape; i++) {
-            mean += data[i];
+#if RPITORCH_HAS_NEON
+        // Vectorized mean computation
+        float32x4_t vsum = vdupq_n_f32(0.0f);
+        uint32_t i = 0;
+        for (; i + 4 <= norm_shape; i += 4) {
+            vsum = vaddq_f32(vsum, vld1q_f32(&data[i]));
         }
-        mean /= layer->normalized_shape;
+        float mean = vaddvq_f32(vsum);
+        for (; i < norm_shape; i++) mean += data[i];
+        mean *= inv_norm;
         
-        float var = 0.0f;
-        for (uint32_t i = 0; i < layer->normalized_shape; i++) {
+        // Vectorized variance computation
+        float32x4_t vmean = vdupq_n_f32(mean);
+        float32x4_t vvar = vdupq_n_f32(0.0f);
+        for (i = 0; i + 4 <= norm_shape; i += 4) {
+            float32x4_t d = vsubq_f32(vld1q_f32(&data[i]), vmean);
+            vvar = vfmaq_f32(vvar, d, d);
+        }
+        float var = vaddvq_f32(vvar);
+        for (; i < norm_shape; i++) {
             float diff = data[i] - mean;
             var += diff * diff;
         }
-        var /= layer->normalized_shape;
+        var *= inv_norm;
+        
+        // Fast reciprocal sqrt with 2x Newton-Raphson (avoids sqrtf + div)
+        float var_eps = var + layer->eps;
+        float32x4_t vvar_eps = vdupq_n_f32(var_eps);
+        float32x4_t est = vrsqrteq_f32(vvar_eps);
+        est = vmulq_f32(est, vrsqrtsq_f32(vmulq_f32(vvar_eps, est), est));
+        est = vmulq_f32(est, vrsqrtsq_f32(vmulq_f32(vvar_eps, est), est));
+        float inv_std = vgetq_lane_f32(est, 0);
+        float32x4_t vinv_std = vdupq_n_f32(inv_std);
+        
+        // 8-wide normalization loop
+        for (i = 0; i + 8 <= norm_shape; i += 8) {
+            float32x4_t d0 = vsubq_f32(vld1q_f32(&data[i]), vmean);
+            float32x4_t d1 = vsubq_f32(vld1q_f32(&data[i+4]), vmean);
+            float32x4_t n0 = vmulq_f32(d0, vinv_std);
+            float32x4_t n1 = vmulq_f32(d1, vinv_std);
+            float32x4_t w0 = vld1q_f32(&weight[i]);
+            float32x4_t w1 = vld1q_f32(&weight[i+4]);
+            float32x4_t b0 = vld1q_f32(&bias[i]);
+            float32x4_t b1 = vld1q_f32(&bias[i+4]);
+            vst1q_f32(&out[i], vfmaq_f32(b0, n0, w0));
+            vst1q_f32(&out[i+4], vfmaq_f32(b1, n1, w1));
+        }
+        // Tail: 4 elements
+        for (; i + 4 <= norm_shape; i += 4) {
+            float32x4_t d = vsubq_f32(vld1q_f32(&data[i]), vmean);
+            float32x4_t norm = vmulq_f32(d, vinv_std);
+            float32x4_t w = vld1q_f32(&weight[i]);
+            float32x4_t bias_v = vld1q_f32(&bias[i]);
+            vst1q_f32(&out[i], vfmaq_f32(bias_v, norm, w));
+        }
+        // Scalar tail
+        for (; i < norm_shape; i++) {
+            out[i] = (data[i] - mean) * inv_std * weight[i] + bias[i];
+        }
+#else
+        // Scalar fallback
+        float mean = 0.0f;
+        for (uint32_t i = 0; i < norm_shape; i++) mean += data[i];
+        mean *= inv_norm;
+        
+        float var = 0.0f;
+        for (uint32_t i = 0; i < norm_shape; i++) {
+            float diff = data[i] - mean;
+            var += diff * diff;
+        }
+        var *= inv_norm;
         
         float inv_std = 1.0f / sqrtf(var + layer->eps);
-        for (uint32_t i = 0; i < layer->normalized_shape; i++) {
-            out[i] = (data[i] - mean) * inv_std * layer->weight->data[i] + layer->bias->data[i];
+        for (uint32_t i = 0; i < norm_shape; i++) {
+            out[i] = (data[i] - mean) * inv_std * weight[i] + bias[i];
         }
+#endif
     }
     
     return output;

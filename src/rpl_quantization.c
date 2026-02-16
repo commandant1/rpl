@@ -75,14 +75,43 @@ void calibrator_free(QuantizationCalibrator* cal) {
 // ============================================================
 
 QuantizedTensor* tensor_quantize_int8_symmetric(const Tensor* input) {
-    // Find min/max
     float min_val = FLT_MAX, max_val = -FLT_MAX;
     
+#if RPITORCH_HAS_NEON
+    // NEON-accelerated min/max finding
+    #pragma omp parallel
+    {
+        float32x4_t vmin = vdupq_n_f32(FLT_MAX);
+        float32x4_t vmax = vdupq_n_f32(-FLT_MAX);
+        
+        #pragma omp for nowait
+        for (uint32_t i = 0; i + 4 <= input->size; i += 4) {
+            float32x4_t v = vld1q_f32(&input->data[i]);
+            vmin = vminq_f32(vmin, v);
+            vmax = vmaxq_f32(vmax, v);
+        }
+        
+        float local_min = vminvq_f32(vmin);
+        float local_max = vmaxvq_f32(vmax);
+        
+        #pragma omp critical
+        {
+            if (local_min < min_val) min_val = local_min;
+            if (local_max > max_val) max_val = local_max;
+        }
+    }
+    // Handle tail
+    for (uint32_t i = (input->size / 4) * 4; i < input->size; i++) {
+        if (input->data[i] < min_val) min_val = input->data[i];
+        if (input->data[i] > max_val) max_val = input->data[i];
+    }
+#else
     #pragma omp parallel for reduction(min:min_val) reduction(max:max_val)
     for (uint32_t i = 0; i < input->size; i++) {
         if (input->data[i] < min_val) min_val = input->data[i];
         if (input->data[i] > max_val) max_val = input->data[i];
     }
+#endif
     
     float abs_max = fmaxf(fabsf(min_val), fabsf(max_val));
     float scale = abs_max / 127.0f;
@@ -310,38 +339,69 @@ void quantized_model_free(QuantizedModel* qm) {
 // Quantized Operations
 // ============================================================
 
-// Quantized Linear Layer
+// Quantized Linear Layer with NEON optimization
+// Uses SDOT if available, falls back to vmlal for older ARM
 void linear_int8(const QuantizedTensor* input, const QuantizedTensor* weight,
                 const QuantizedTensor* bias, int32_t* output,
                 uint32_t batch_size, uint32_t in_features, uint32_t out_features) {
     
-    #pragma omp parallel for
+    #pragma omp parallel for collapse(2)
     for (uint32_t b = 0; b < batch_size; b++) {
         for (uint32_t o = 0; o < out_features; o++) {
             int32_t sum = 0;
+            const int8_t* in_ptr = &input->data[b * in_features];
+            const int8_t* wt_ptr = &weight->data[o * in_features];
             
-            #if RPITORCH_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+#if RPITORCH_HAS_NEON && defined(__ARM_FEATURE_DOTPROD)
+            // ARMv8.4+ with DOTPROD: use vdot for 4x faster throughput
             uint32_t i = 0;
             int32x4_t vsum = vdupq_n_s32(0);
             
             for (; i + 16 <= in_features; i += 16) {
-                int8x16_t vin = vld1q_s8(&input->data[b * in_features + i]);
-                int8x16_t vw = vld1q_s8(&weight->data[o * in_features + i]);
+                int8x16_t vin = vld1q_s8(&in_ptr[i]);
+                int8x16_t vw = vld1q_s8(&wt_ptr[i]);
                 vsum = vdotq_s32(vsum, vin, vw);
             }
             
             sum = vaddvq_s32(vsum);
             
+            // Handle tail
             for (; i < in_features; i++) {
-                sum += input->data[b * in_features + i] * 
-                      weight->data[o * in_features + i];
+                sum += (int32_t)in_ptr[i] * (int32_t)wt_ptr[i];
             }
-            #else
+            
+#elif RPITORCH_HAS_NEON
+            // ARMv8 without DOTPROD: use vmlal for widening multiply-accumulate
+            uint32_t i = 0;
+            int32x4_t vsum = vdupq_n_s32(0);
+            
+            for (; i + 8 <= in_features; i += 8) {
+                // Load 8 int8 values
+                int8x8_t vin = vld1_s8(&in_ptr[i]);
+                int8x8_t vw = vld1_s8(&wt_ptr[i]);
+                
+                // Widening multiply to int16
+                int16x8_t prod = vmull_s8(vin, vw);
+                
+                // Pairwise add to reduce to 4 int32
+                int32x4_t prod32 = vpaddlq_s16(prod);
+                vsum = vaddq_s32(vsum, prod32);
+            }
+            
+            // Horizontal sum
+            sum = vaddvq_s32(vsum);
+            
+            // Handle tail
+            for (; i < in_features; i++) {
+                sum += (int32_t)in_ptr[i] * (int32_t)wt_ptr[i];
+            }
+            
+#else
+            // Scalar fallback
             for (uint32_t i = 0; i < in_features; i++) {
-                sum += input->data[b * in_features + i] * 
-                      weight->data[o * in_features + i];
+                sum += (int32_t)in_ptr[i] * (int32_t)wt_ptr[i];
             }
-            #endif
+#endif
             
             if (bias) {
                 sum += bias->data[o];

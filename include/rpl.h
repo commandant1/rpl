@@ -444,6 +444,296 @@ void grid_search_add_param(GridSearch* gs, uint32_t param_idx, const char* name,
 void grid_search_fit(GridSearch* gs, GridSearchScoreFunc score_func, void* user_data);
 void grid_search_free(GridSearch* gs);
 
+// ============================================================
+// Math Operations (rpl_math.c)
+// ============================================================
+
+// Trig
+Tensor* tensor_sin(const Tensor* t); void tensor_sin_inplace(Tensor* t);
+Tensor* tensor_cos(const Tensor* t); void tensor_cos_inplace(Tensor* t);
+Tensor* tensor_tan(const Tensor* t); void tensor_tan_inplace(Tensor* t);
+Tensor* tensor_asin(const Tensor* t); void tensor_asin_inplace(Tensor* t);
+Tensor* tensor_acos(const Tensor* t); void tensor_acos_inplace(Tensor* t);
+Tensor* tensor_atan(const Tensor* t); void tensor_atan_inplace(Tensor* t);
+Tensor* tensor_atan2(const Tensor* a, const Tensor* b);
+Tensor* tensor_hypot(const Tensor* a, const Tensor* b);
+
+// Hyperbolic
+Tensor* tensor_sinh(const Tensor* t); void tensor_sinh_inplace(Tensor* t);
+Tensor* tensor_cosh(const Tensor* t); void tensor_cosh_inplace(Tensor* t);
+Tensor* tensor_asinh(const Tensor* t); void tensor_asinh_inplace(Tensor* t);
+Tensor* tensor_acosh(const Tensor* t); void tensor_acosh_inplace(Tensor* t);
+Tensor* tensor_atanh(const Tensor* t); void tensor_atanh_inplace(Tensor* t);
+
+// Exp/Log
+Tensor* tensor_exp(const Tensor* t); void tensor_exp_inplace(Tensor* t);
+Tensor* tensor_expm1(const Tensor* t); void tensor_expm1_inplace(Tensor* t);
+Tensor* tensor_exp2(const Tensor* t); void tensor_exp2_inplace(Tensor* t);
+Tensor* tensor_log(const Tensor* t); void tensor_log_inplace(Tensor* t);
+Tensor* tensor_log2(const Tensor* t); void tensor_log2_inplace(Tensor* t);
+Tensor* tensor_log10(const Tensor* t); void tensor_log10_inplace(Tensor* t);
+Tensor* tensor_log1p(const Tensor* t); void tensor_log1p_inplace(Tensor* t);
+Tensor* tensor_logaddexp(const Tensor* a, const Tensor* b);
+Tensor* tensor_logaddexp2(const Tensor* a, const Tensor* b);
+
+// Rounding
+Tensor* tensor_round_op(const Tensor* t); void tensor_round_op_inplace(Tensor* t);
+Tensor* tensor_floor_op(const Tensor* t); void tensor_floor_op_inplace(Tensor* t);
+Tensor* tensor_ceil_op(const Tensor* t); void tensor_ceil_op_inplace(Tensor* t);
+Tensor* tensor_trunc_op(const Tensor* t); void tensor_trunc_op_inplace(Tensor* t);
+Tensor* tensor_frac(const Tensor* t); void tensor_frac_inplace(Tensor* t);
+
+// Power/Root
+Tensor* tensor_pow_op(const Tensor* a, const Tensor* b);
+Tensor* tensor_sqrt_op(const Tensor* t); void tensor_sqrt_op_inplace(Tensor* t);
+Tensor* tensor_rsqrt(const Tensor* t); void tensor_rsqrt_inplace(Tensor* t);
+Tensor* tensor_square(const Tensor* t); void tensor_square_inplace(Tensor* t);
+Tensor* tensor_cbrt(const Tensor* t); void tensor_cbrt_inplace(Tensor* t);
+Tensor* tensor_reciprocal(const Tensor* t); void tensor_reciprocal_inplace(Tensor* t);
+
+// Abs/Sign/Clamp
+Tensor* tensor_abs_op(const Tensor* t); void tensor_abs_op_inplace(Tensor* t);
+Tensor* tensor_neg(const Tensor* t); void tensor_neg_inplace(Tensor* t);
+Tensor* tensor_sign(const Tensor* t); void tensor_sign_inplace(Tensor* t);
+Tensor* tensor_signbit_op(const Tensor* t); void tensor_signbit_op_inplace(Tensor* t);
+Tensor* tensor_copysign_op(const Tensor* a, const Tensor* b);
+Tensor* tensor_heaviside(const Tensor* a, const Tensor* b);
+Tensor* tensor_clamp(const Tensor* t, float lo, float hi);
+void tensor_clamp_inplace(Tensor* t, float lo, float hi);
+Tensor* tensor_nan_to_num(const Tensor* t, float nan_v, float posinf_v, float neginf_v);
+Tensor* tensor_lerp(const Tensor* a, const Tensor* b, float weight);
+
+// Angular
+Tensor* tensor_deg2rad(const Tensor* t); void tensor_deg2rad_inplace(Tensor* t);
+Tensor* tensor_rad2deg(const Tensor* t); void tensor_rad2deg_inplace(Tensor* t);
+
+// Special
+Tensor* tensor_erf(const Tensor* t); void tensor_erf_inplace(Tensor* t);
+Tensor* tensor_erfc(const Tensor* t); void tensor_erfc_inplace(Tensor* t);
+Tensor* tensor_erfinv(const Tensor* t); void tensor_erfinv_inplace(Tensor* t);
+Tensor* tensor_lgamma_op(const Tensor* t); void tensor_lgamma_op_inplace(Tensor* t);
+Tensor* tensor_digamma(const Tensor* t); void tensor_digamma_inplace(Tensor* t);
+Tensor* tensor_sinc(const Tensor* t); void tensor_sinc_inplace(Tensor* t);
+Tensor* tensor_i0(const Tensor* t); void tensor_i0_inplace(Tensor* t);
+Tensor* tensor_logit(const Tensor* t); void tensor_logit_inplace(Tensor* t);
+
+// Binary math
+Tensor* tensor_fmod_op(const Tensor* a, const Tensor* b);
+Tensor* tensor_remainder_op(const Tensor* a, const Tensor* b);
+Tensor* tensor_floor_divide(const Tensor* a, const Tensor* b);
+Tensor* tensor_true_divide(const Tensor* a, const Tensor* b);
+Tensor* tensor_sub(const Tensor* a, const Tensor* b);
+Tensor* tensor_div(const Tensor* a, const Tensor* b);
+Tensor* tensor_xlogy(const Tensor* a, const Tensor* b);
+Tensor* tensor_addcdiv(const Tensor* input, const Tensor* t1, const Tensor* t2, float value);
+Tensor* tensor_addcmul(const Tensor* input, const Tensor* t1, const Tensor* t2, float value);
+
+// ============================================================
+// Tensor Manipulation (rpl_manipulation.c)
+// ============================================================
+
+Tensor* tensor_reshape(const Tensor* t, uint32_t dims, const uint32_t* shape);
+Tensor* tensor_squeeze(const Tensor* t);
+Tensor* tensor_unsqueeze(const Tensor* t, int32_t dim);
+Tensor* tensor_flatten(const Tensor* t, int32_t start_dim, int32_t end_dim);
+Tensor* tensor_ravel(const Tensor* t);
+Tensor* tensor_t_op(const Tensor* t);
+Tensor* tensor_transpose(const Tensor* t, int32_t dim0, int32_t dim1);
+Tensor* tensor_permute(const Tensor* t, const uint32_t* perm);
+Tensor* tensor_movedim(const Tensor* t, int32_t src, int32_t dst);
+Tensor* tensor_swapaxes(const Tensor* t, int32_t a, int32_t b);
+Tensor* tensor_cat(const Tensor** tensors, uint32_t num, int32_t dim);
+Tensor* tensor_stack(const Tensor** tensors, uint32_t num, int32_t dim);
+Tensor* tensor_hstack(const Tensor** tensors, uint32_t num);
+Tensor* tensor_vstack(const Tensor** tensors, uint32_t num);
+Tensor** tensor_chunk(const Tensor* t, uint32_t chunks, int32_t dim, uint32_t* out_num);
+Tensor** tensor_split(const Tensor* t, uint32_t sections, int32_t dim, uint32_t* out_num);
+Tensor* tensor_index_select(const Tensor* t, int32_t dim, const uint32_t* indices, uint32_t n_idx);
+Tensor* tensor_gather(const Tensor* t, int32_t dim, const Tensor* index);
+Tensor* tensor_where_cond(const Tensor* cond, const Tensor* x, const Tensor* y);
+Tensor* tensor_masked_select(const Tensor* t, const Tensor* mask, uint32_t* out_size);
+Tensor* tensor_nonzero_indices(const Tensor* t, uint32_t* count);
+Tensor* tensor_flip(const Tensor* t, const int32_t* dims, uint32_t n_dims);
+Tensor* tensor_fliplr(const Tensor* t);
+Tensor* tensor_flipud(const Tensor* t);
+Tensor* tensor_roll(const Tensor* t, int32_t shift, int32_t dim);
+Tensor* tensor_clone(const Tensor* t);
+Tensor* tensor_tile(const Tensor* t, const uint32_t* reps, uint32_t n_reps);
+Tensor* tensor_narrow(const Tensor* t, int32_t dim, uint32_t start, uint32_t length);
+
+// ============================================================
+// Reduction Operations (rpl_reduce.c)
+// ============================================================
+
+// Full reductions
+float tensor_sum_all(const Tensor* t);
+float tensor_prod_all(const Tensor* t);
+float tensor_mean_all(const Tensor* t);
+float tensor_var_all(const Tensor* t, bool unbiased);
+float tensor_std_all(const Tensor* t, bool unbiased);
+float tensor_max_all(const Tensor* t);
+float tensor_min_all(const Tensor* t);
+uint32_t tensor_argmax_all(const Tensor* t);
+uint32_t tensor_argmin_all(const Tensor* t);
+float tensor_norm_all(const Tensor* t, float p);
+float tensor_logsumexp_all(const Tensor* t);
+uint32_t tensor_count_nonzero_all(const Tensor* t);
+float tensor_median_all(const Tensor* t);
+
+// NaN-safe
+float tensor_nansum_all(const Tensor* t);
+float tensor_nanmean_all(const Tensor* t);
+float tensor_nanprod_all(const Tensor* t);
+float tensor_nanmax_all(const Tensor* t);
+float tensor_nanmin_all(const Tensor* t);
+
+// Axis reductions
+Tensor* tensor_sum(const Tensor* t, int32_t dim);
+Tensor* tensor_prod(const Tensor* t, int32_t dim);
+Tensor* tensor_mean(const Tensor* t, int32_t dim);
+Tensor* tensor_var(const Tensor* t, int32_t dim, bool unbiased);
+Tensor* tensor_std(const Tensor* t, int32_t dim, bool unbiased);
+Tensor* tensor_max_dim(const Tensor* t, int32_t dim);
+Tensor* tensor_min_dim(const Tensor* t, int32_t dim);
+Tensor* tensor_argmax_dim(const Tensor* t, int32_t dim);
+Tensor* tensor_argmin_dim(const Tensor* t, int32_t dim);
+
+// Cumulative
+Tensor* tensor_cumsum(const Tensor* t, int32_t dim);
+Tensor* tensor_cumprod(const Tensor* t, int32_t dim);
+Tensor* tensor_cummax(const Tensor* t, int32_t dim);
+Tensor* tensor_cummin(const Tensor* t, int32_t dim);
+
+// Diff
+Tensor* tensor_diff(const Tensor* t, int32_t dim);
+bool tensor_all(const Tensor* t);
+bool tensor_any(const Tensor* t);
+float tensor_dist(const Tensor* a, const Tensor* b, float p);
+
+// ============================================================
+// Comparison & Logic (rpl_compare.c)
+// ============================================================
+
+Tensor* tensor_eq(const Tensor* a, const Tensor* b);
+Tensor* tensor_ne(const Tensor* a, const Tensor* b);
+Tensor* tensor_lt(const Tensor* a, const Tensor* b);
+Tensor* tensor_le(const Tensor* a, const Tensor* b);
+Tensor* tensor_gt(const Tensor* a, const Tensor* b);
+Tensor* tensor_ge(const Tensor* a, const Tensor* b);
+bool tensor_equal(const Tensor* a, const Tensor* b);
+bool tensor_allclose(const Tensor* a, const Tensor* b, float rtol, float atol);
+Tensor* tensor_isclose(const Tensor* a, const Tensor* b, float rtol, float atol);
+Tensor* tensor_logical_and(const Tensor* a, const Tensor* b);
+Tensor* tensor_logical_or(const Tensor* a, const Tensor* b);
+Tensor* tensor_logical_not(const Tensor* t);
+Tensor* tensor_logical_xor(const Tensor* a, const Tensor* b);
+Tensor* tensor_isnan_op(const Tensor* t);
+Tensor* tensor_isinf_op(const Tensor* t);
+Tensor* tensor_isfinite_op(const Tensor* t);
+Tensor* tensor_isposinf(const Tensor* t);
+Tensor* tensor_isneginf(const Tensor* t);
+Tensor* tensor_maximum(const Tensor* a, const Tensor* b);
+Tensor* tensor_minimum(const Tensor* a, const Tensor* b);
+Tensor* tensor_fmax(const Tensor* a, const Tensor* b);
+Tensor* tensor_fmin(const Tensor* a, const Tensor* b);
+Tensor* tensor_sort_op(const Tensor* t, int32_t dim, bool descending, Tensor** indices);
+Tensor* tensor_argsort(const Tensor* t, int32_t dim, bool descending);
+Tensor* tensor_topk(const Tensor* t, uint32_t k, int32_t dim, bool largest);
+Tensor* tensor_unique(const Tensor* t, uint32_t* out_count);
+Tensor* tensor_isin(const Tensor* elements, const Tensor* test);
+
+// ============================================================
+// Linear Algebra (rpl_linalg.c)
+// ============================================================
+
+float tensor_dot(const Tensor* a, const Tensor* b);
+float tensor_vdot(const Tensor* a, const Tensor* b);
+Tensor* tensor_inner(const Tensor* a, const Tensor* b);
+Tensor* tensor_outer(const Tensor* a, const Tensor* b);
+Tensor* tensor_mm(const Tensor* a, const Tensor* b);
+Tensor* tensor_mv(const Tensor* mat, const Tensor* vec);
+Tensor* tensor_bmm(const Tensor* a, const Tensor* b);
+Tensor* tensor_addmm(const Tensor* input, const Tensor* m1, const Tensor* m2, float beta, float alpha);
+Tensor* tensor_addr(const Tensor* input, const Tensor* v1, const Tensor* v2, float beta, float alpha);
+float tensor_trace(const Tensor* t);
+Tensor* tensor_diag(const Tensor* t, int32_t diagonal);
+Tensor* tensor_tril(const Tensor* t, int32_t diagonal);
+Tensor* tensor_triu(const Tensor* t, int32_t diagonal);
+Tensor* tensor_eye(uint32_t n);
+Tensor* tensor_cross(const Tensor* a, const Tensor* b);
+float tensor_det(const Tensor* t);
+Tensor* tensor_inverse(const Tensor* t);
+Tensor* tensor_cholesky(const Tensor* t);
+Tensor* tensor_matrix_power(const Tensor* t, int32_t n);
+Tensor* tensor_kron(const Tensor* a, const Tensor* b);
+Tensor* tensor_tensordot(const Tensor* a, const Tensor* b, uint32_t dims);
+
+// ============================================================
+// FFT (rpl_fft.c)
+// ============================================================
+
+Tensor* tensor_fft(const Tensor* t);
+Tensor* tensor_ifft(const Tensor* t);
+Tensor* tensor_rfft(const Tensor* t);
+Tensor* tensor_irfft(const Tensor* t, uint32_t n);
+Tensor* tensor_stft(const Tensor* t, uint32_t n_fft, uint32_t hop_length);
+
+// ============================================================
+// Random (rpl_random.c)
+// ============================================================
+
+void rpl_manual_seed(uint64_t seed);
+void rpl_seed(void);
+Tensor* tensor_zeros(uint32_t dims, const uint32_t* shape);
+Tensor* tensor_ones(uint32_t dims, const uint32_t* shape);
+Tensor* tensor_full(uint32_t dims, const uint32_t* shape, float value);
+Tensor* tensor_zeros_like(const Tensor* t);
+Tensor* tensor_ones_like(const Tensor* t);
+Tensor* tensor_full_like(const Tensor* t, float value);
+Tensor* tensor_empty(uint32_t dims, const uint32_t* shape);
+Tensor* tensor_empty_like(const Tensor* t);
+Tensor* tensor_arange(float start, float end, float step);
+Tensor* tensor_linspace(float start, float end, uint32_t steps);
+Tensor* tensor_logspace(float start, float end, uint32_t steps, float base);
+Tensor* tensor_rand(uint32_t dims, const uint32_t* shape);
+Tensor* tensor_randn(uint32_t dims, const uint32_t* shape);
+Tensor* tensor_randint(int32_t low, int32_t high, uint32_t dims, const uint32_t* shape);
+Tensor* tensor_randperm(uint32_t n);
+Tensor* tensor_rand_like(const Tensor* t);
+Tensor* tensor_randn_like(const Tensor* t);
+Tensor* tensor_bernoulli(const Tensor* probs);
+Tensor* tensor_normal(float mean, float std, uint32_t dims, const uint32_t* shape);
+Tensor* tensor_poisson_sample(const Tensor* rates);
+Tensor* tensor_multinomial(const Tensor* probs, uint32_t num_samples, bool replacement);
+void tensor_meshgrid(const Tensor** inputs, uint32_t n_inputs, Tensor** outputs);
+
+// ============================================================
+// Utilities (rpl_util.c)
+// ============================================================
+
+uint32_t tensor_numel(const Tensor* t);
+bool tensor_is_floating_point(const Tensor* t);
+bool tensor_is_nonzero(const Tensor* t);
+Tensor* tensor_contiguous(const Tensor* t);
+Tensor* tensor_broadcast_to(const Tensor* t, uint32_t dims, const uint32_t* shape);
+Tensor* tensor_atleast_1d(const Tensor* t);
+Tensor* tensor_atleast_2d(const Tensor* t);
+Tensor* tensor_atleast_3d(const Tensor* t);
+Tensor* tensor_block_diag(const Tensor** tensors, uint32_t num);
+Tensor* tensor_vander(const Tensor* x, uint32_t N, bool increasing);
+Tensor* tensor_hann_window(uint32_t size);
+Tensor* tensor_hamming_window(uint32_t size);
+Tensor* tensor_blackman_window(uint32_t size);
+Tensor* tensor_bartlett_window(uint32_t size);
+Tensor* tensor_kaiser_window(uint32_t size, float beta);
+Tensor* tensor_convolve(const Tensor* a, const Tensor* v);
+Tensor* tensor_interp(const Tensor* x, const Tensor* xp, const Tensor* fp);
+Tensor* tensor_bincount(const Tensor* t, uint32_t minlength);
+Tensor* tensor_histc(const Tensor* t, uint32_t bins, float min_val, float max_val);
+float tensor_trapezoid(const Tensor* y, float dx);
+Tensor* tensor_corrcoef(const Tensor* t);
+Tensor* tensor_cdist(const Tensor* x1, const Tensor* x2, float p);
+
 #ifdef __cplusplus
 }
 #endif

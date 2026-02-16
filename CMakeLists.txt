@@ -41,6 +41,14 @@ set(SOURCES
     src/probabilistic.c
     src/rpl_gpu.c
     src/rpl_half.c
+    src/rpl_math.c
+    src/rpl_manipulation.c
+    src/rpl_reduce.c
+    src/rpl_compare.c
+    src/rpl_linalg.c
+    src/rpl_fft.c
+    src/rpl_random.c
+    src/rpl_util.c
 )
 
 # Shared library
@@ -54,6 +62,11 @@ target_link_libraries(rpl_static m pthread ${LIBS})
 # C Training Example (XOR)
 add_executable(rpl_train_xor examples/train_xor.c)
 target_link_libraries(rpl_train_xor PRIVATE rpl)
+
+# Test suite
+add_executable(test_new_api tests/test_new_api.c)
+target_link_libraries(test_new_api PRIVATE rpl m)
+
 
 # Installation
 # GPU Test Executable (Only if GPU is enabled)

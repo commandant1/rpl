@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "../../rpi4_ml_lib"
+		},
+		{
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
