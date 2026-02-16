@@ -149,6 +149,28 @@ void tensor_swish(Tensor* out, const Tensor* in);
 void tensor_swish_inplace(Tensor* t);
 void tensor_softplus(Tensor* out, const Tensor* in, float beta, float threshold);
 void tensor_softplus_inplace(Tensor* t, float beta, float threshold);
+void tensor_gelu(Tensor* out, const Tensor* in);
+void tensor_selu(Tensor* out, const Tensor* in);
+void tensor_selu_inplace(Tensor* t);
+void tensor_mish(Tensor* out, const Tensor* in);
+void tensor_mish_inplace(Tensor* t);
+void tensor_hardswish(Tensor* out, const Tensor* in);
+void tensor_hardswish_inplace(Tensor* t);
+void tensor_hardsigmoid(Tensor* out, const Tensor* in);
+void tensor_hardsigmoid_inplace(Tensor* t);
+void tensor_hardtanh(Tensor* out, const Tensor* in, float min_val, float max_val);
+void tensor_hardtanh_inplace(Tensor* t, float min_val, float max_val);
+void tensor_celu(Tensor* out, const Tensor* in, float alpha);
+void tensor_celu_inplace(Tensor* t, float alpha);
+void tensor_softsign(Tensor* out, const Tensor* in);
+void tensor_softsign_inplace(Tensor* t);
+void tensor_log_softmax(Tensor* out, const Tensor* in);
+void tensor_log_softmax_inplace(Tensor* t);
+void tensor_prelu(Tensor* out, const Tensor* in, const Tensor* weight);
+void tensor_rrelu(Tensor* out, const Tensor* in, float lower, float upper);
+void tensor_rrelu_inplace(Tensor* t, float lower, float upper);
+void tensor_threshold(Tensor* out, const Tensor* in, float threshold, float value);
+void tensor_threshold_inplace(Tensor* t, float threshold, float value);
 
 // Autograd
 void tensor_backward(Tensor* t);

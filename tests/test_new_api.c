@@ -711,6 +711,109 @@ static void test_util(void) {
     tensor_free(t);
 }
 
+// ============================================================
+// Activation Tests
+// ============================================================
+
+static Tensor* act_like(const Tensor* t) { return tensor_create(t->dims, t->shape, false); }
+
+static void test_activations(void) {
+    printf("--- Activations ---\n");
+
+    // Test input: [-2, -1, 0, 1, 2]
+    Tensor* t = make_1d((float[]){-2, -1, 0, 1, 2}, 5);
+    Tensor* out = act_like(t);
+
+    // GELU: GELU(-2)≈-0.0454, GELU(0)=0, GELU(1)≈0.8413, GELU(2)≈1.9545
+    tensor_gelu(out, t);
+    ASSERT_CLOSE("gelu[2]", out->data[2], 0.0f, 1e-3f);       // GELU(0) = 0
+    ASSERT_CLOSE("gelu[3]", out->data[3], 0.8412f, 0.02f);     // GELU(1)
+    ASSERT_CLOSE("gelu[4]", out->data[4], 1.9545f, 0.02f);     // GELU(2)
+
+    // SELU: SELU(1) = 1.0507*1 = 1.0507, SELU(-1) = 1.0507*1.6733*(e^-1 - 1) ≈ -1.1113
+    tensor_selu(out, t);
+    ASSERT_CLOSE("selu[3]", out->data[3], 1.0507f, 0.02f);
+    ASSERT_CLOSE("selu[1]", out->data[1], -1.1113f, 0.05f);
+
+    // Mish: Mish(0) = 0, Mish(1) = 1*tanh(ln(1+e^1)) ≈ 0.8651
+    tensor_mish(out, t);
+    ASSERT_CLOSE("mish[2]", out->data[2], 0.0f, 1e-3f);
+    ASSERT_CLOSE("mish[3]", out->data[3], 0.8651f, 0.02f);
+
+    // Hardswish: x*clip(x+3,0,6)/6
+    // HS(-2) = -2*max(min(-2+3,6),0)/6 = -2*1/6 = -0.3333
+    // HS(0) = 0*3/6 = 0
+    // HS(2) = 2*5/6 = 1.6667
+    tensor_hardswish(out, t);
+    ASSERT_CLOSE("hardswish[0]", out->data[0], -0.3333f, 1e-3f);
+    ASSERT_CLOSE("hardswish[2]", out->data[2], 0.0f, 1e-5f);
+    ASSERT_CLOSE("hardswish[4]", out->data[4], 1.6667f, 1e-3f);
+
+    // Hardsigmoid: clip(x/6+0.5, 0, 1)
+    // HS(-2) = clip(-2/6+0.5, 0, 1) = clip(0.1667, 0, 1) = 0.1667
+    // HS(0) = 0.5
+    // HS(2) = clip(0.8333, 0, 1) = 0.8333
+    tensor_hardsigmoid(out, t);
+    ASSERT_CLOSE("hardsigmoid[0]", out->data[0], 0.1667f, 1e-3f);
+    ASSERT_CLOSE("hardsigmoid[2]", out->data[2], 0.5f, 1e-5f);
+    ASSERT_CLOSE("hardsigmoid[4]", out->data[4], 0.8333f, 1e-3f);
+
+    // Hardtanh: clamp to [-1, 1]
+    tensor_hardtanh(out, t, -1.0f, 1.0f);
+    ASSERT_CLOSE("hardtanh[0]", out->data[0], -1.0f, 1e-5f);  // -2 clamped to -1
+    ASSERT_CLOSE("hardtanh[2]", out->data[2], 0.0f, 1e-5f);   // 0 unchanged
+    ASSERT_CLOSE("hardtanh[4]", out->data[4], 1.0f, 1e-5f);   // 2 clamped to 1
+
+    // CELU: max(0,x) + min(0, alpha*(exp(x/alpha)-1)), alpha=1
+    // CELU(-1, alpha=1) = 0 + min(0, 1*(e^-1 - 1)) = e^-1 - 1 ≈ -0.6321
+    // CELU(1, alpha=1) = 1
+    tensor_celu(out, t, 1.0f);
+    ASSERT_CLOSE("celu[1]", out->data[1], -0.6321f, 0.02f);
+    ASSERT_CLOSE("celu[3]", out->data[3], 1.0f, 1e-3f);
+
+    // Softsign: x/(1+|x|)
+    // SS(-1) = -1/2 = -0.5, SS(0) = 0, SS(1) = 0.5
+    tensor_softsign(out, t);
+    ASSERT_CLOSE("softsign[1]", out->data[1], -0.5f, 0.01f);
+    ASSERT_CLOSE("softsign[2]", out->data[2], 0.0f, 1e-3f);
+    ASSERT_CLOSE("softsign[3]", out->data[3], 0.5f, 0.01f);
+
+    // LogSoftmax: x - log(sum(exp(x)))
+    Tensor* lsm_in = make_1d((float[]){1, 2, 3}, 3);
+    Tensor* lsm_out = act_like(lsm_in);
+    tensor_log_softmax(lsm_out, lsm_in);
+    // log(e^1 + e^2 + e^3) = 3 + log(e^-2 + e^-1 + 1) ≈ 3.4076
+    // lsm[2] = 3 - 3.4076 = -0.4076
+    ASSERT_CLOSE("logsoftmax[2]", lsm_out->data[2], -0.4076f, 0.01f);
+    // All should sum to approximately log(1).. actually sum(exp(lsm)) = 1
+    float lsm_sum = expf(lsm_out->data[0]) + expf(lsm_out->data[1]) + expf(lsm_out->data[2]);
+    ASSERT_CLOSE("logsoftmax sum(exp)", lsm_sum, 1.0f, 0.01f);
+    tensor_free(lsm_in); tensor_free(lsm_out);
+
+    // RReLU: at eval, slope = (lower+upper)/2
+    // RReLU(-1, 0.1, 0.3) = -1 * 0.2 = -0.2
+    // RReLU(1, ...) = 1
+    tensor_rrelu(out, t, 0.1f, 0.3f);
+    ASSERT_CLOSE("rrelu[1]", out->data[1], -0.2f, 1e-3f);
+    ASSERT_CLOSE("rrelu[3]", out->data[3], 1.0f, 1e-5f);
+
+    // Threshold: x if x > thresh else value
+    tensor_threshold(out, t, 0.0f, -99.0f);
+    ASSERT_CLOSE("threshold[0]", out->data[0], -99.0f, 1e-5f);  // -2 <= 0
+    ASSERT_CLOSE("threshold[2]", out->data[2], -99.0f, 1e-5f);  // 0 <= 0
+    ASSERT_CLOSE("threshold[3]", out->data[3], 1.0f, 1e-5f);    // 1 > 0
+
+    // PReLU with scalar weight
+    Tensor* w = make_1d((float[]){0.25f}, 1);
+    tensor_prelu(out, t, w);
+    ASSERT_CLOSE("prelu[0]", out->data[0], -0.5f, 1e-3f);     // -2 * 0.25
+    ASSERT_CLOSE("prelu[3]", out->data[3], 1.0f, 1e-5f);
+    tensor_free(w);
+
+    tensor_free(t);
+    tensor_free(out);
+}
+
 int main(void) {
     printf("=== RPL New API Tests ===\n\n");
     test_math();
@@ -721,6 +824,7 @@ int main(void) {
     test_fft();
     test_random();
     test_util();
+    test_activations();
 
     printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;
