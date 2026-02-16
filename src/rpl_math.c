@@ -361,6 +361,17 @@ Tensor* tensor_lerp(const Tensor* a, const Tensor* b, float w) {
 // Sub / Div (NEON)
 Tensor* tensor_sub(const Tensor* a, const Tensor* b) {
     Tensor* out = _like(a);
+#ifdef USE_GPU
+    if (a->device == DEVICE_GPU || b->device == DEVICE_GPU) {
+        if (a->size == b->size) {
+            tensor_sub_gpu(out, a, b);
+            return;
+        } else {
+            tensor_from_gpu((Tensor*)a);
+            tensor_from_gpu((Tensor*)b);
+        }
+    }
+#endif
 #if RPITORCH_HAS_NEON
     uint32_t i = 0;
     if (a->size == b->size) {
@@ -382,6 +393,17 @@ Tensor* tensor_sub(const Tensor* a, const Tensor* b) {
 
 Tensor* tensor_div(const Tensor* a, const Tensor* b) {
     Tensor* out = _like(a);
+#ifdef USE_GPU
+    if (a->device == DEVICE_GPU || b->device == DEVICE_GPU) {
+        if (a->size == b->size) {
+            tensor_div_gpu(out, a, b);
+            return;
+        } else {
+            tensor_from_gpu((Tensor*)a);
+            tensor_from_gpu((Tensor*)b);
+        }
+    }
+#endif
     #pragma omp parallel for
     for (uint32_t i = 0; i < a->size; i++) out->data[i] = a->data[i] / b->data[i % b->size];
     return out;

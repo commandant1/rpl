@@ -23,12 +23,12 @@ class RTensor(ctypes.Structure):
         ("requires_grad", ctypes.c_bool),
         ("_allocation", ctypes.c_void_p),
         ("_alloc_size", ctypes.c_size_t),
+        ("device", ctypes.c_int32),
+        ("gpu_buffer", ctypes.c_uint32),
         ("is_leaf", ctypes.c_bool),
         ("parent1", ctypes.c_void_p),
         ("parent2", ctypes.c_void_p),
         ("backward_fn", ctypes.c_void_p),
-        ("device", ctypes.c_int),
-        ("gpu_buffer", ctypes.c_uint32),
     ]
 
 class Device:

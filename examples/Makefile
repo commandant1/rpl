@@ -5,12 +5,15 @@ CFLAGS = -O3 -march=native -fopenmp -I../include
 LDFLAGS = -L../build -lrpl -lm -fopenmp
 
 # Targets
-all: c_api_demo simple_nn
+all: c_api_demo simple_nn train_xor
 
 c_api_demo: c_api_demo.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 simple_nn: simple_nn.c
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
+train_xor: train_xor.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 run_demo: c_api_demo

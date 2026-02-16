@@ -288,6 +288,12 @@ void tensor_softplus_inplace(Tensor* t, float beta, float threshold) {
 // ============================================================
 
 void tensor_gelu(Tensor* out, const Tensor* in) {
+#ifdef USE_GPU
+    if (in->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        tensor_gelu_gpu(out, in);
+        return;
+    }
+#endif
 #if RPITORCH_HAS_NEON
     const float32x4_t HALF = vdupq_n_f32(0.5f);
     const float32x4_t ONE = vdupq_n_f32(1.0f);

@@ -138,6 +138,9 @@ Tensor* tensor_create(uint32_t dims, const uint32_t* shape, bool requires_grad) 
 
 void tensor_free(Tensor* t) {
     if (!t) return;
+#ifdef USE_GPU
+    tensor_free_gpu(t);
+#endif
     size_t alloc_size = t->_alloc_size;
     if (t->_allocation) pool_free(t->_allocation, alloc_size);
     if (t->grad) pool_free(t->grad, alloc_size);
@@ -175,6 +178,13 @@ void tensor_randomize(Tensor* t) {
 
 void tensor_add_out(Tensor* out, const Tensor* a, const Tensor* b) {
     if (a->size == b->size && out->size == a->size) {
+#ifdef USE_GPU
+        if (a->device == DEVICE_GPU || b->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+            tensor_add_gpu(out, a, b);
+            goto finalize;
+        }
+#endif
+
 #if RPITORCH_HAS_NEON
         const float* restrict pa = a->data;
         const float* restrict pb = b->data;
@@ -214,12 +224,19 @@ void tensor_add_out(Tensor* out, const Tensor* a, const Tensor* b) {
         for (uint32_t i = 0; i < out->size; i++) out->data[i] = a->data[i] + b->data[i];
 #endif
     } else {
+#ifdef USE_GPU
+        tensor_from_gpu((Tensor*)a);
+        tensor_from_gpu((Tensor*)b);
+        tensor_from_gpu(out);
+#endif
         #pragma omp parallel for
         for (uint32_t i = 0; i < out->size; i++) {
             out->data[i] = a->data[i] + b->data[i % b->size];
         }
     }
-    
+
+finalize:
+
     if (out->requires_grad) {
         out->parent1 = (void*)a;
         out->parent2 = (void*)b;
@@ -234,8 +251,15 @@ Tensor* tensor_add(const Tensor* a, const Tensor* b) {
     return out;
 }
 
-void tensor_mul_out(Tensor* restrict out, const Tensor* restrict a, const Tensor* restrict b) {
+void tensor_mul_out(Tensor* out, const Tensor* a, const Tensor* b) {
     if (a->size == b->size && out->size == a->size) {
+#ifdef USE_GPU
+        if (a->device == DEVICE_GPU || b->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+            tensor_mul_gpu(out, a, b);
+            goto finalize;
+        }
+#endif
+
 #if RPITORCH_HAS_NEON
         const float* restrict pa = a->data;
         const float* restrict pb = b->data;
@@ -273,12 +297,19 @@ void tensor_mul_out(Tensor* restrict out, const Tensor* restrict a, const Tensor
         for (uint32_t i = 0; i < out->size; i++) out->data[i] = a->data[i] * b->data[i];
 #endif
     } else {
+#ifdef USE_GPU
+        tensor_from_gpu((Tensor*)a);
+        tensor_from_gpu((Tensor*)b);
+        tensor_from_gpu(out);
+#endif
         #pragma omp parallel for
         for (uint32_t i = 0; i < out->size; i++) {
             out->data[i] = a->data[i] * b->data[i % b->size];
         }
     }
-    
+
+finalize:
+
     if (out->requires_grad) {
         out->parent1 = (void*)a;
         out->parent2 = (void*)b;
@@ -320,6 +351,20 @@ void tensor_gemm(Tensor* C, const Tensor* A, const Tensor* B,
     uint32_t M = trans_a ? A->shape[1] : A->shape[0];
     uint32_t K = trans_a ? A->shape[0] : A->shape[1];
     uint32_t N = trans_b ? B->shape[0] : B->shape[1];
+
+#ifdef USE_GPU
+    if (A->device == DEVICE_GPU || B->device == DEVICE_GPU || C->device == DEVICE_GPU) {
+        if (!trans_a && !trans_b && alpha == 1.0f && beta == 0.0f) {
+            tensor_matmul_gpu(C, A, B);
+            return;
+        } else {
+            tensor_from_gpu((Tensor*)A);
+            tensor_from_gpu((Tensor*)B);
+            tensor_from_gpu(C);
+        }
+    }
+#endif
+
     
     // Fast path: non-transposed A, transposed B (common for linear layers: A @ B^T)
     // Use optimized GEMM for better performance
@@ -480,6 +525,12 @@ void tensor_sigmoid_inplace(Tensor* t) {
 
 Tensor* tensor_relu(const Tensor* t) {
     Tensor* out = tensor_create(t->dims, t->shape, t->requires_grad);
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        tensor_relu_gpu(out, t);
+        goto finalize;
+    }
+#endif
     
     #if RPITORCH_HAS_NEON
         #pragma omp parallel for
@@ -497,7 +548,7 @@ Tensor* tensor_relu(const Tensor* t) {
         #pragma omp parallel for
         for (uint32_t i = 0; i < t->size; i++) out->data[i] = (t->data[i] > 0) ? t->data[i] : 0;
     #endif
-
+finalize:
     if (out->requires_grad) {
         out->parent1 = (void*)t;
         out->backward_fn = backward_relu;
@@ -508,6 +559,12 @@ Tensor* tensor_relu(const Tensor* t) {
 
 Tensor* tensor_sigmoid(const Tensor* t) {
     Tensor* out = tensor_create(t->dims, t->shape, t->requires_grad);
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        tensor_sigmoid_gpu(out, t);
+        goto finalize;
+    }
+#endif
     
 #if RPITORCH_HAS_NEON
     const float32x4_t LOG2E = vdupq_n_f32(1.442695040f);
@@ -551,7 +608,7 @@ Tensor* tensor_sigmoid(const Tensor* t) {
     #pragma omp parallel for
     for (uint32_t i = 0; i < t->size; i++) out->data[i] = 1.0f / (1.0f + expf(-t->data[i]));
 #endif
-    
+finalize:
     if (out->requires_grad) {
         out->parent1 = (void*)t;
         out->backward_fn = backward_sigmoid;
@@ -736,6 +793,12 @@ void tensor_fill_buffer(float* buffer, float value, uint32_t size) {
     for (uint32_t i = 0; i < size; i++) buffer[i] = value;
 }
 void tensor_tanh_inplace(Tensor* t) {
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU) {
+        tensor_tanh_gpu(t, t);
+        return;
+    }
+#endif
 #if RPITORCH_HAS_NEON
     // tanh(x) = 2*sigmoid(2x) - 1
     const float32x4_t TWO = vdupq_n_f32(2.0f);

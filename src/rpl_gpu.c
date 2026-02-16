@@ -6,6 +6,7 @@
 #ifdef USE_GPU
 
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
 #include <GLES3/gl31.h>
 
 static EGLDisplay display = EGL_NO_DISPLAY;
@@ -38,6 +39,7 @@ static PFNGLUNIFORM1UIPROC p_glUniform1ui = NULL;
 static PFNGLGETUNIFORMLOCATIONPROC p_glGetUniformLocation = NULL;
 static PFNGLDISPATCHCOMPUTEPROC p_glDispatchCompute = NULL;
 static PFNGLMEMORYBARRIERPROC p_glMemoryBarrier = NULL;
+static PFNGLUNIFORM1IPROC p_glUniform1i = NULL;
 static PFNGLGETSTRINGPROC p_glGetString = NULL;
 
 static void load_gl_funcs() {
@@ -60,6 +62,9 @@ static void load_gl_funcs() {
     p_glUniform1ui = (PFNGLUNIFORM1UIPROC)eglGetProcAddress("glUniform1ui");
     p_glGetUniformLocation = (PFNGLGETUNIFORMLOCATIONPROC)eglGetProcAddress("glGetUniformLocation");
     p_glGetString = (PFNGLGETSTRINGPROC)eglGetProcAddress("glGetString");
+    p_glDispatchCompute = (PFNGLDISPATCHCOMPUTEPROC)eglGetProcAddress("glDispatchCompute");
+    p_glMemoryBarrier = (PFNGLMEMORYBARRIERPROC)eglGetProcAddress("glMemoryBarrier");
+    p_glUniform1i = (PFNGLUNIFORM1IPROC)eglGetProcAddress("glUniform1i");
 }
 
 // Macro helper to call dynamic pointers
@@ -83,31 +88,27 @@ static void load_gl_funcs() {
 #define glGetUniformLocation p_glGetUniformLocation
 #define glDispatchCompute p_glDispatchCompute
 #define glMemoryBarrier p_glMemoryBarrier
+#define glUniform1i p_glUniform1i
 #define glGetString p_glGetString
 
 bool rpl_gpu_init() {
-    if (display != EGL_NO_DISPLAY) return true; // Already initialized
+    if (display != EGL_NO_DISPLAY) return true;
 
-    // Try default display first
-    display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    // Headless/Surfaceless initialization
+    PFNEGLGETPLATFORMDISPLAYPROC eglGetPlatformDisplay = 
+        (PFNEGLGETPLATFORMDISPLAYPROC)eglGetProcAddress("eglGetPlatformDisplay");
+
+    if (eglGetPlatformDisplay) {
+        display = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
+    }
+
+    if (display == EGL_NO_DISPLAY) {
+        display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    }
     
     EGLint major, minor;
     if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor)) {
-        // Fallback for headless: Surfaceless
-        // Some systems require explicit PFN loading, but simple linking might work if supported
-        // Or simpler: Just tell user to export EGL_PLATFORM=surfaceless
-        
-        // Let's print detailed error
-        fprintf(stderr, "Default EGL init failed. Trying fallback...\n");
-        
-        // Terminate previous attempt
-        if (display != EGL_NO_DISPLAY) eglTerminate(display);
         display = EGL_NO_DISPLAY;
-        
-        // Try getting display via generic method (might need extensions)
-        // For now, simpler approach: Just error out but suggest environment var
-        fprintf(stderr, "RPL requires a valid EGL display.\n");
-        fprintf(stderr, "On Raspberry Pi/Headless, try running: export EGL_PLATFORM=surfaceless\n");
         return false;
     }
     
@@ -185,6 +186,7 @@ config_found:;
     if (p_glGetString) {
         printf("RPL GPU Initialized: %s\n", p_glGetString(GL_VERSION));
     }
+    
     return true;
 }
 
@@ -204,12 +206,17 @@ void tensor_to_gpu(Tensor* t) {
     if (!rpl_gpu_init()) return;
 
     GLuint buffer;
-    glGenBuffers(1, &buffer);
+    if (t->gpu_buffer != 0) {
+        buffer = t->gpu_buffer;
+    } else {
+        glGenBuffers(1, &buffer);
+        t->gpu_buffer = buffer;
+    }
+    
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
     glBufferData(GL_SHADER_STORAGE_BUFFER, t->size * sizeof(float), t->data, GL_DYNAMIC_COPY);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-    t->gpu_buffer = buffer;
     t->device = DEVICE_GPU;
 }
 
@@ -225,8 +232,14 @@ void tensor_from_gpu(Tensor* t) {
     }
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     
-    // Optional: Keep buffer on GPU? For now, let's treat it as sync
-    // t->device = DEVICE_CPU; 
+    t->device = DEVICE_CPU; 
+}
+
+void tensor_free_gpu(Tensor* t) {
+    if (t->gpu_buffer != 0) {
+        glDeleteBuffers(1, &t->gpu_buffer);
+        t->gpu_buffer = 0;
+    }
 }
 
 // Simple compute shader compiler
@@ -256,57 +269,68 @@ GLuint compile_compute_shader(const char* source) {
 // Compute Shaders
 // ============================================================
 
-static const char* ADD_SHADER_SRC =
+static const char* BINARY_SHADER_SRC =
     "#version 310 es\n"
     "layout(local_size_x = 256) in;\n"
     "layout(std430, binding = 0) readonly buffer InputA { float data_a[]; };\n"
     "layout(std430, binding = 1) readonly buffer InputB { float data_b[]; };\n"
     "layout(std430, binding = 2) writeonly buffer Output { float data_out[]; };\n"
     "uniform uint size;\n"
+    "uniform int op;\n" // 0: add, 1: sub, 2: mul, 3: div
     "void main() {\n"
     "    uint id = gl_GlobalInvocationID.x;\n"
     "    if (id < size) {\n"
-    "        data_out[id] = data_a[id] + data_b[id];\n"
+    "        if (op == 0) data_out[id] = data_a[id] + data_b[id];\n"
+    "        else if (op == 1) data_out[id] = data_a[id] - data_b[id];\n"
+    "        else if (op == 2) data_out[id] = data_a[id] * data_b[id];\n"
+    "        else if (op == 3) data_out[id] = data_a[id] / data_b[id];\n"
     "    }\n"
     "}\n";
 
-static GLuint add_program = 0;
+static GLuint binary_program = 0;
 
-void tensor_add_gpu(Tensor* out, const Tensor* a, const Tensor* b) {
+void dispatch_binary_op(Tensor* out, const Tensor* a, const Tensor* b, int op) {
     if (!rpl_gpu_init()) return;
 
-    // Ensure inputs are on GPU
     tensor_to_gpu((Tensor*)a);
     tensor_to_gpu((Tensor*)b);
     
-    // Allocate output on GPU if not already
     if (out->device != DEVICE_GPU) {
-        tensor_to_gpu(out); // This allocates specific size based on out->size
+        tensor_to_gpu(out);
     }
 
-    // Compile shader if needed
-    if (add_program == 0) {
-        add_program = compile_compute_shader(ADD_SHADER_SRC);
-        if (add_program == 0) return;
+    if (binary_program == 0) {
+        binary_program = compile_compute_shader(BINARY_SHADER_SRC);
+        if (binary_program == 0) return;
     }
 
-    glUseProgram(add_program);
-
-    // Bind buffers
+    glUseProgram(binary_program);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, a->gpu_buffer);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, b->gpu_buffer);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, out->gpu_buffer);
 
-    // Set uniforms
-    glUniform1ui(glGetUniformLocation(add_program, "size"), out->size);
+    glUniform1ui(glGetUniformLocation(binary_program, "size"), out->size);
+    glUniform1i(glGetUniformLocation(binary_program, "op"), op);
 
-    // Dispatch
-    // local_size_x is 256, so we need ceil(size / 256) groups
     GLuint num_groups = (out->size + 255) / 256;
     glDispatchCompute(num_groups, 1, 1);
-
-    // Barrier to ensure completion before next read/write
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+void tensor_add_gpu(Tensor* out, const Tensor* a, const Tensor* b) {
+    dispatch_binary_op(out, a, b, 0);
+}
+
+void tensor_sub_gpu(Tensor* out, const Tensor* a, const Tensor* b) {
+    dispatch_binary_op(out, a, b, 1);
+}
+
+void tensor_mul_gpu(Tensor* out, const Tensor* a, const Tensor* b) {
+    dispatch_binary_op(out, a, b, 2);
+}
+
+void tensor_div_gpu(Tensor* out, const Tensor* a, const Tensor* b) {
+    dispatch_binary_op(out, a, b, 3);
 }
 
 static const char* GEMM_SHADER_SRC =
