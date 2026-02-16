@@ -158,6 +158,99 @@ _sig("tensor_minimum", [_PTR, _PTR], _PTR)
 
 # Linalg
 _sig("tensor_dot", [_PTR, _PTR], _F)
+_sig("tensor_outer", [_PTR, _PTR], _PTR)
+_sig("tensor_cross", [_PTR, _PTR], _PTR)
+_sig("tensor_mv", [_PTR, _PTR], _PTR)
+_sig("tensor_eye", [_U32], _PTR)
+_sig("tensor_trace", [_PTR], _F)
+_sig("tensor_det", [_PTR], _F)
+_sig("tensor_inverse", [_PTR], _PTR)
+_sig("tensor_tril", [_PTR, _I32], _PTR)
+_sig("tensor_triu", [_PTR, _I32], _PTR)
+_sig("tensor_diag", [_PTR, _I32], _PTR)
+_sig("tensor_cholesky", [_PTR], _PTR)
+_sig("tensor_matrix_power", [_PTR, _I32], _PTR)
+_sig("tensor_bmm", [_PTR, _PTR], _PTR)
+
+# Manipulation
+_sig("tensor_reshape", [_PTR, _U32, ctypes.POINTER(_U32)], _PTR)
+_sig("tensor_squeeze", [_PTR], _PTR)
+_sig("tensor_unsqueeze", [_PTR, _I32], _PTR)
+_sig("tensor_flatten", [_PTR, _I32, _I32], _PTR)
+_sig("tensor_t_op", [_PTR], _PTR)
+_sig("tensor_cat", [ctypes.POINTER(_PTR), _U32, _I32], _PTR)
+_sig("tensor_stack", [ctypes.POINTER(_PTR), _U32, _I32], _PTR)
+_sig("tensor_chunk", [_PTR, _U32, _I32, ctypes.POINTER(_U32)], ctypes.POINTER(_PTR))
+_sig("tensor_clone", [_PTR], _PTR)
+_sig("tensor_flip", [_PTR, ctypes.POINTER(_I32), _U32], _PTR)
+_sig("tensor_roll", [_PTR, _I32, _I32], _PTR)
+_sig("tensor_narrow", [_PTR, _I32, _U32, _U32], _PTR)
+_sig("tensor_index_select", [_PTR, _I32, ctypes.POINTER(_U32), _U32], _PTR)
+_sig("tensor_where_cond", [_PTR, _PTR, _PTR], _PTR)
+_sig("tensor_tile", [_PTR, ctypes.POINTER(_U32), _U32], _PTR)
+
+# FFT
+_sig("tensor_fft", [_PTR], _PTR)
+_sig("tensor_ifft", [_PTR], _PTR)
+
+# Random / Creation
+_sig("rpl_manual_seed", [ctypes.c_uint64], None)
+_sig("tensor_rand", [_U32, ctypes.POINTER(_U32)], _PTR)
+_sig("tensor_randn", [_U32, ctypes.POINTER(_U32)], _PTR)
+_sig("tensor_zeros", [_U32, ctypes.POINTER(_U32)], _PTR)
+_sig("tensor_ones", [_U32, ctypes.POINTER(_U32)], _PTR)
+_sig("tensor_arange", [_F, _F, _F], _PTR)
+_sig("tensor_linspace", [_F, _F, _U32], _PTR)
+_sig("tensor_randperm", [_U32], _PTR)
+_sig("tensor_zeros_like", [_PTR], _PTR)
+_sig("tensor_ones_like", [_PTR], _PTR)
+
+# Utility
+_sig("tensor_numel", [_PTR], _U32)
+_sig("tensor_is_floating_point", [_PTR], _BOOL)
+_sig("tensor_hann_window", [_U32], _PTR)
+_sig("tensor_hamming_window", [_U32], _PTR)
+_sig("tensor_bincount", [_PTR, _U32], _PTR)
+_sig("tensor_histc", [_PTR, _U32, _F, _F], _PTR)
+_sig("tensor_broadcast_to", [_PTR, _U32, ctypes.POINTER(_U32)], _PTR)
+_sig("tensor_convolve", [_PTR, _PTR], _PTR)
+_sig("tensor_interp", [_PTR, _PTR, _PTR], _PTR)
+_sig("tensor_trapezoid", [_PTR, _F], _F)
+
+# Missing math
+_sig("tensor_nan_to_num", [_PTR, _F, _F, _F], _PTR)
+_sig("tensor_lerp", [_PTR, _PTR, _F], _PTR)
+_sig("tensor_addcmul", [_PTR, _PTR, _PTR, _F], _PTR)
+_sig("tensor_addcdiv", [_PTR, _PTR, _PTR, _F], _PTR)
+_sig("tensor_div", [_PTR, _PTR], _PTR)
+_sig("tensor_sub", [_PTR, _PTR], _PTR)
+
+# Missing reduce
+_sig("tensor_prod_all", [_PTR], _F)
+_sig("tensor_median_all", [_PTR], _F)
+_sig("tensor_count_nonzero_all", [_PTR], _U32)
+_sig("tensor_cumsum", [_PTR, _I32], _PTR)
+_sig("tensor_diff", [_PTR, _I32], _PTR)
+_sig("tensor_all", [_PTR], _BOOL)
+_sig("tensor_any", [_PTR], _BOOL)
+_sig("tensor_nansum_all", [_PTR], _F)
+_sig("tensor_nanmean_all", [_PTR], _F)
+_sig("tensor_nanmax_all", [_PTR], _F)
+_sig("tensor_nanmin_all", [_PTR], _F)
+_sig("tensor_dist", [_PTR, _PTR, _F], _F)
+_sig("tensor_argmax_dim", [_PTR, _I32], _PTR)
+
+# Missing compare
+_sig("tensor_logical_and", [_PTR, _PTR], _PTR)
+_sig("tensor_logical_or", [_PTR, _PTR], _PTR)
+_sig("tensor_logical_not", [_PTR], _PTR)
+_sig("tensor_isnan_op", [_PTR], _PTR)
+_sig("tensor_isinf_op", [_PTR], _PTR)
+_sig("tensor_isfinite_op", [_PTR], _PTR)
+_sig("tensor_sort_op", [_PTR, _I32, _BOOL, ctypes.POINTER(_PTR)], _PTR)
+_sig("tensor_equal", [_PTR, _PTR], _BOOL)
+_sig("tensor_allclose", [_PTR, _PTR, _F, _F], _BOOL)
+_sig("tensor_unique", [_PTR, ctypes.POINTER(_U32)], _PTR)
 
 # GPU prototypes
 try:
@@ -503,6 +596,223 @@ class Tensor:
     def dot(self, other):
         return float(_lib.tensor_dot(self._ptr, other._ptr))
 
+    def outer(self, other):
+        return Tensor(_ptr=_lib.tensor_outer(self._ptr, other._ptr))
+
+    def cross(self, other):
+        return Tensor(_ptr=_lib.tensor_cross(self._ptr, other._ptr))
+
+    def mv(self, vec):
+        return Tensor(_ptr=_lib.tensor_mv(self._ptr, vec._ptr))
+
+    def trace(self):
+        return float(_lib.tensor_trace(self._ptr))
+
+    def det(self):
+        return float(_lib.tensor_det(self._ptr))
+
+    def inverse(self):
+        return Tensor(_ptr=_lib.tensor_inverse(self._ptr))
+
+    def tril(self, diagonal=0):
+        return Tensor(_ptr=_lib.tensor_tril(self._ptr, diagonal))
+
+    def triu(self, diagonal=0):
+        return Tensor(_ptr=_lib.tensor_triu(self._ptr, diagonal))
+
+    def diag(self, diagonal=0):
+        return Tensor(_ptr=_lib.tensor_diag(self._ptr, diagonal))
+
+    def cholesky(self):
+        return Tensor(_ptr=_lib.tensor_cholesky(self._ptr))
+
+    def matrix_power(self, n):
+        return Tensor(_ptr=_lib.tensor_matrix_power(self._ptr, n))
+
+    def bmm(self, other):
+        return Tensor(_ptr=_lib.tensor_bmm(self._ptr, other._ptr))
+
+    # --- Manipulation ---
+    def reshape(self, *shape):
+        if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
+            shape = shape[0]
+        c_shape = (ctypes.c_uint32 * len(shape))(*shape)
+        return Tensor(_ptr=_lib.tensor_reshape(self._ptr, len(shape), c_shape))
+
+    def squeeze(self):
+        return Tensor(_ptr=_lib.tensor_squeeze(self._ptr))
+
+    def unsqueeze(self, dim):
+        return Tensor(_ptr=_lib.tensor_unsqueeze(self._ptr, dim))
+
+    def flatten(self, start_dim=0, end_dim=-1):
+        return Tensor(_ptr=_lib.tensor_flatten(self._ptr, start_dim, end_dim))
+
+    @property
+    def T(self):
+        return Tensor(_ptr=_lib.tensor_t_op(self._ptr))
+
+    def flip(self, dims):
+        if isinstance(dims, int):
+            dims = [dims]
+        c_dims = (ctypes.c_int32 * len(dims))(*dims)
+        return Tensor(_ptr=_lib.tensor_flip(self._ptr, c_dims, len(dims)))
+
+    def roll(self, shift, dim=0):
+        return Tensor(_ptr=_lib.tensor_roll(self._ptr, shift, dim))
+
+    def narrow(self, dim, start, length):
+        return Tensor(_ptr=_lib.tensor_narrow(self._ptr, dim, start, length))
+
+    def index_select(self, dim, indices):
+        c_idx = (ctypes.c_uint32 * len(indices))(*indices)
+        return Tensor(_ptr=_lib.tensor_index_select(self._ptr, dim, c_idx, len(indices)))
+
+    def tile(self, reps):
+        if isinstance(reps, int):
+            reps = [reps]
+        c_reps = (ctypes.c_uint32 * len(reps))(*reps)
+        return Tensor(_ptr=_lib.tensor_tile(self._ptr, c_reps, len(reps)))
+
+    # --- Additional Math ---
+    def tan(self):
+        return Tensor(_ptr=_lib.tensor_tan(self._ptr))
+
+    def asin(self):
+        return Tensor(_ptr=_lib.tensor_asin(self._ptr))
+
+    def acos(self):
+        return Tensor(_ptr=_lib.tensor_acos(self._ptr))
+
+    def atan(self):
+        return Tensor(_ptr=_lib.tensor_atan(self._ptr))
+
+    def sinh(self):
+        return Tensor(_ptr=_lib.tensor_sinh(self._ptr))
+
+    def cosh(self):
+        return Tensor(_ptr=_lib.tensor_cosh(self._ptr))
+
+    def exp2(self):
+        return Tensor(_ptr=_lib.tensor_exp2(self._ptr))
+
+    def expm1(self):
+        return Tensor(_ptr=_lib.tensor_expm1(self._ptr))
+
+    def log2(self):
+        return Tensor(_ptr=_lib.tensor_log2(self._ptr))
+
+    def log10(self):
+        return Tensor(_ptr=_lib.tensor_log10(self._ptr))
+
+    def log1p(self):
+        return Tensor(_ptr=_lib.tensor_log1p(self._ptr))
+
+    def frac(self):
+        return Tensor(_ptr=_lib.tensor_frac(self._ptr))
+
+    def cbrt(self):
+        return Tensor(_ptr=_lib.tensor_cbrt(self._ptr))
+
+    def erf(self):
+        return Tensor(_ptr=_lib.tensor_erf(self._ptr))
+
+    def erfc(self):
+        return Tensor(_ptr=_lib.tensor_erfc(self._ptr))
+
+    def nan_to_num(self, nan=0.0, posinf=1e10, neginf=-1e10):
+        return Tensor(_ptr=_lib.tensor_nan_to_num(self._ptr, nan, posinf, neginf))
+
+    def lerp(self, other, weight):
+        return Tensor(_ptr=_lib.tensor_lerp(self._ptr, other._ptr, weight))
+
+    def trunc(self):
+        return Tensor(_ptr=_lib.tensor_trunc_op(self._ptr))
+
+    # --- Additional Reductions ---
+    def prod(self):
+        return float(_lib.tensor_prod_all(self._ptr))
+
+    def median(self):
+        return float(_lib.tensor_median_all(self._ptr))
+
+    def count_nonzero(self):
+        return int(_lib.tensor_count_nonzero_all(self._ptr))
+
+    def cumsum(self, dim=0):
+        return Tensor(_ptr=_lib.tensor_cumsum(self._ptr, dim))
+
+    def diff(self, dim=0):
+        return Tensor(_ptr=_lib.tensor_diff(self._ptr, dim))
+
+    def all(self):
+        return bool(_lib.tensor_all(self._ptr))
+
+    def any(self):
+        return bool(_lib.tensor_any(self._ptr))
+
+    def nansum(self):
+        return float(_lib.tensor_nansum_all(self._ptr))
+
+    def nanmean(self):
+        return float(_lib.tensor_nanmean_all(self._ptr))
+
+    def dist(self, other, p=2.0):
+        return float(_lib.tensor_dist(self._ptr, other._ptr, p))
+
+    def argmax_dim(self, dim):
+        return Tensor(_ptr=_lib.tensor_argmax_dim(self._ptr, dim))
+
+    # --- Additional Compare ---
+    def logical_and(self, other):
+        return Tensor(_ptr=_lib.tensor_logical_and(self._ptr, other._ptr))
+
+    def logical_or(self, other):
+        return Tensor(_ptr=_lib.tensor_logical_or(self._ptr, other._ptr))
+
+    def logical_not(self):
+        return Tensor(_ptr=_lib.tensor_logical_not(self._ptr))
+
+    def isnan(self):
+        return Tensor(_ptr=_lib.tensor_isnan_op(self._ptr))
+
+    def isinf(self):
+        return Tensor(_ptr=_lib.tensor_isinf_op(self._ptr))
+
+    def isfinite(self):
+        return Tensor(_ptr=_lib.tensor_isfinite_op(self._ptr))
+
+    def maximum(self, other):
+        return Tensor(_ptr=_lib.tensor_maximum(self._ptr, other._ptr))
+
+    def minimum(self, other):
+        return Tensor(_ptr=_lib.tensor_minimum(self._ptr, other._ptr))
+
+    def sort(self, dim=0, descending=False):
+        idx_ptr = ctypes.POINTER(RTensor)()
+        sorted_ptr = _lib.tensor_sort_op(self._ptr, dim, descending, ctypes.byref(idx_ptr))
+        sorted_t = Tensor(_ptr=sorted_ptr)
+        idx_t = Tensor(_ptr=idx_ptr)
+        return sorted_t, idx_t
+
+    def equal(self, other):
+        return bool(_lib.tensor_equal(self._ptr, other._ptr))
+
+    def allclose(self, other, rtol=1e-5, atol=1e-8):
+        return bool(_lib.tensor_allclose(self._ptr, other._ptr, rtol, atol))
+
+    def unique(self):
+        count = ctypes.c_uint32()
+        ptr = _lib.tensor_unique(self._ptr, ctypes.byref(count))
+        return Tensor(_ptr=ptr), int(count.value)
+
+    # --- FFT ---
+    def fft(self):
+        return Tensor(_ptr=_lib.tensor_fft(self._ptr))
+
+    def ifft(self):
+        return Tensor(_ptr=_lib.tensor_ifft(self._ptr))
+
     # --- Utility ---
     def fill_(self, value):
         _lib.tensor_fill(self._ptr, value)
@@ -511,6 +821,12 @@ class Tensor:
     def randomize_(self):
         _lib.tensor_randomize(self._ptr)
         return self
+
+    def numel(self):
+        return int(_lib.tensor_numel(self._ptr))
+
+    def is_floating_point(self):
+        return bool(_lib.tensor_is_floating_point(self._ptr))
 
     def numpy(self):
         """Return a copy as numpy array."""
@@ -521,3 +837,61 @@ class Tensor:
 
     def __len__(self):
         return self.shape[0] if self.ndim > 0 else 1
+
+    def __truediv__(self, other):
+        if isinstance(other, Tensor):
+            return Tensor(_ptr=_lib.tensor_div(self._ptr, other._ptr))
+        raise TypeError("Only Tensor divisions supported")
+
+# ============================================================
+# Module-level factory functions
+# ============================================================
+
+def manual_seed(seed):
+    _lib.rpl_manual_seed(seed)
+
+def rand(*shape):
+    c_shape = (ctypes.c_uint32 * len(shape))(*shape)
+    return Tensor(_ptr=_lib.tensor_rand(len(shape), c_shape))
+
+def randn(*shape):
+    c_shape = (ctypes.c_uint32 * len(shape))(*shape)
+    return Tensor(_ptr=_lib.tensor_randn(len(shape), c_shape))
+
+def zeros(*shape):
+    c_shape = (ctypes.c_uint32 * len(shape))(*shape)
+    return Tensor(_ptr=_lib.tensor_zeros(len(shape), c_shape))
+
+def ones(*shape):
+    c_shape = (ctypes.c_uint32 * len(shape))(*shape)
+    return Tensor(_ptr=_lib.tensor_ones(len(shape), c_shape))
+
+def arange(start, end, step=1.0):
+    return Tensor(_ptr=_lib.tensor_arange(start, end, step))
+
+def linspace(start, end, steps):
+    return Tensor(_ptr=_lib.tensor_linspace(start, end, steps))
+
+def randperm(n):
+    return Tensor(_ptr=_lib.tensor_randperm(n))
+
+def eye(n):
+    return Tensor(_ptr=_lib.tensor_eye(n))
+
+def cat(tensors, dim=0):
+    arr = (ctypes.POINTER(RTensor) * len(tensors))(*[t._ptr for t in tensors])
+    return Tensor(_ptr=_lib.tensor_cat(arr, len(tensors), dim))
+
+def stack(tensors, dim=0):
+    arr = (ctypes.POINTER(RTensor) * len(tensors))(*[t._ptr for t in tensors])
+    return Tensor(_ptr=_lib.tensor_stack(arr, len(tensors), dim))
+
+def where(cond, x, y):
+    return Tensor(_ptr=_lib.tensor_where_cond(cond._ptr, x._ptr, y._ptr))
+
+def hann_window(size):
+    return Tensor(_ptr=_lib.tensor_hann_window(size))
+
+def hamming_window(size):
+    return Tensor(_ptr=_lib.tensor_hamming_window(size))
+
