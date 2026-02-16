@@ -9,6 +9,12 @@
 #include <math.h>
 #include <float.h>
 
+// Forward declarations for external functions
+void parallel_gemm_optimized(const float* A, const float* B, float* C, uint32_t M, uint32_t N, uint32_t K);
+void conv2d_winograd_3x3(const float* input, const float* kernel, float* output,
+                          int in_channels, int out_channels,
+                          int height, int width, int stride, int padding);
+
 // ============================================================
 // Linear Layer
 // ============================================================
@@ -176,7 +182,6 @@ Tensor* conv2d_forward(Conv2dLayer* layer, const Tensor* input) {
             float* out_b = &output->data[b * layer->out_channels * out_h * out_w];
             
             // im2col: flatten input patches into columns
-            uint32_t col_idx = 0;
             for (uint32_t oy = 0; oy < out_h; oy++) {
                 for (uint32_t ox = 0; ox < out_w; ox++) {
                     for (uint32_t ic = 0; ic < layer->in_channels; ic++) {

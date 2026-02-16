@@ -30,7 +30,7 @@ static inline float32x4_t fast_exp_neon(float32x4_t x) {
     const float32x4_t ONE = vdupq_n_f32(1.0f);
     
     // Clamp and compute t = x * log2(e)
-    x = vmaxq_f32(vminnq_f32(x, vdupq_n_f32(87.0f)), vdupq_n_f32(-87.0f));
+    x = vmaxq_f32(vminq_f32(x, vdupq_n_f32(87.0f)), vdupq_n_f32(-87.0f));
     float32x4_t t = vmulq_f32(x, LOG2E);
     
     // Fast floor using truncation + correction
@@ -118,7 +118,6 @@ static inline float32x4_t fast_log_neon(float32x4_t x) {
 // ============================================================
 
 void tensor_leaky_relu(Tensor* out, const Tensor* in, float negative_slope) {
-    uint32_t i = 0;
     
     #if RPITORCH_HAS_NEON
     float32x4_t vzero = vdupq_n_f32(0.0f);
@@ -141,7 +140,7 @@ void tensor_leaky_relu(Tensor* out, const Tensor* in, float negative_slope) {
     }
     #else
     #pragma omp parallel for
-    for (i = 0; i < in->size; i++) {
+    for (uint32_t i = 0; i < in->size; i++) {
         out->data[i] = (in->data[i] > 0.0f) ? in->data[i] : negative_slope * in->data[i];
     }
     #endif

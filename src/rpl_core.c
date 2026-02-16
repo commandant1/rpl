@@ -25,6 +25,10 @@ void backward_matmul(Tensor* t);
 void backward_relu(Tensor* t);
 void backward_sigmoid(Tensor* t);
 void backward_mse(Tensor* t);
+void parallel_gemm_optimized(const float* A, const float* B, float* C, uint32_t M, uint32_t N, uint32_t K);
+void conv2d_winograd_3x3(const float* input, const float* kernel, float* output,
+                          int in_channels, int out_channels,
+                          int height, int width, int stride, int padding);
 
 // ============================================================
 // Memory Management — Thread-Local Slab Pool
@@ -169,7 +173,7 @@ void tensor_randomize(Tensor* t) {
     }
 }
 
-void tensor_add_out(Tensor* restrict out, const Tensor* restrict a, const Tensor* restrict b) {
+void tensor_add_out(Tensor* out, const Tensor* a, const Tensor* b) {
     if (a->size == b->size && out->size == a->size) {
 #if RPITORCH_HAS_NEON
         const float* restrict pa = a->data;
@@ -936,5 +940,4 @@ void tensor_batchnorm2d(Tensor* out, const Tensor* in, float* weight, float* bia
 void tensor_dropout(Tensor* out, const Tensor* in, float p, bool training) {}
 void gemm_init_buffers();
 void gemm_free_buffers();
-void parallel_gemm_optimized(float* A, float* B, float* C, uint32_t M, uint32_t N, uint32_t K);
 void conv2d_winograd_2x2_3x3(const Tensor* input, const Tensor* weight, Tensor* output) {}
