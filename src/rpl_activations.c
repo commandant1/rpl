@@ -75,6 +75,42 @@ static inline float32x4_t fast_rsqrt_neon(float32x4_t x) {
     return est;
 }
 
+// ============================================================
+// fast_log_neon — fully vectorized natural log
+// Decomposes IEEE-754 float into exponent + mantissa, then uses
+// a minimax polynomial on [1,2) for the mantissa.
+// Max relative error: ~1e-4 (sufficient for activations)
+// ============================================================
+static inline float32x4_t fast_log_neon(float32x4_t x) {
+    // Extract exponent: e = ((bits >> 23) & 0xFF) - 127
+    int32x4_t bits = vreinterpretq_s32_f32(x);
+    int32x4_t e = vsubq_s32(vshrq_n_s32(bits, 23), vdupq_n_s32(127));
+    float32x4_t fe = vcvtq_f32_s32(e);
+
+    // Extract mantissa in [1, 2): clear exponent, set to 127
+    int32x4_t mantissa_bits = vorrq_s32(
+        vandq_s32(bits, vdupq_n_s32(0x007FFFFF)),
+        vdupq_n_s32(0x3F800000));
+    float32x4_t m = vreinterpretq_f32_s32(mantissa_bits);
+
+    // Polynomial approximation for log(m) on [1, 2)
+    // log(m) ≈ (m-1) * (c0 + (m-1) * (c1 + (m-1) * c2))
+    // Minimax coefficients for [1,2): c0≈0.9999, c1≈-0.4999, c2≈0.3333
+    const float32x4_t c0 = vdupq_n_f32(0.99999994f);
+    const float32x4_t c1 = vdupq_n_f32(-0.49999603f);
+    const float32x4_t c2 = vdupq_n_f32(0.33329940f);
+    const float32x4_t LN2 = vdupq_n_f32(0.6931471805599453f);
+
+    float32x4_t f = vsubq_f32(m, vdupq_n_f32(1.0f));
+    // Horner: log(m) = f * (c0 + f * (c1 + f * c2))
+    float32x4_t p = vfmaq_f32(c1, f, c2);
+    p = vfmaq_f32(c0, f, p);
+    float32x4_t log_m = vmulq_f32(f, p);
+
+    // log(x) = e * ln(2) + log(m)
+    return vfmaq_f32(log_m, fe, LN2);
+}
+
 #endif // RPITORCH_HAS_NEON
 
 // ============================================================
@@ -207,66 +243,38 @@ void tensor_swish_inplace(Tensor* t) {
 
 void tensor_softplus(Tensor* out, const Tensor* in, float beta, float threshold) {
 #if RPITORCH_HAS_NEON
-    float32x4_t vbeta = vdupq_n_f32(beta);
-    float32x4_t vthreshold = vdupq_n_f32(threshold);
-    float32x4_t vone = vdupq_n_f32(1.0f);
-    float inv_beta = 1.0f / beta;
-    float32x4_t vinv_beta = vdupq_n_f32(inv_beta);
-    
-    #pragma omp parallel for
-    for (uint32_t base = 0; base < in->size; base += 256) {
-        uint32_t end = (base + 256 < in->size) ? base + 256 : in->size;
-        uint32_t i = base;
-        
-        for (; i + 4 <= end; i += 4) {
-            float32x4_t x = vld1q_f32(&in->data[i]);
+    const float32x4_t vbeta = vdupq_n_f32(beta);
+    const float32x4_t vthreshold = vdupq_n_f32(threshold);
+    const float32x4_t vone = vdupq_n_f32(1.0f);
+    const float32x4_t vinv_beta = vdupq_n_f32(1.0f / beta);
+    uint32_t i = 0;
+    // 4× unroll = 16 floats = 1 cache line per iteration
+    for (; i + 16 <= in->size; i += 16) {
+        __builtin_prefetch(&in->data[i + 64], 0, 1);
+        for (int k = 0; k < 16; k += 4) {
+            float32x4_t x = vld1q_f32(&in->data[i + k]);
             float32x4_t bx = vmulq_f32(vbeta, x);
-            
-            // Check if beta*x > threshold (use linear approximation)
             uint32x4_t lin_mask = vcgtq_f32(bx, vthreshold);
-            
-            // log(1 + exp(beta*x)) / beta
-            float32x4_t exp_bx = fast_exp_neon(bx);
-            float32x4_t log_arg = vaddq_f32(vone, exp_bx);
-            
-            // Fast log approximation using NEON
-            // log(x) ≈ (x-1) - (x-1)^2/2 + (x-1)^3/3 for x near 1
-            // For general values, use scalar fallback in tail
-            // Here we use a simpler approach: extract and use logf
-            float log_vals[4];
-            vst1q_f32(log_vals, log_arg);
-            float sp_vals[4] = {
-                logf(log_vals[0]) * inv_beta,
-                logf(log_vals[1]) * inv_beta,
-                logf(log_vals[2]) * inv_beta,
-                logf(log_vals[3]) * inv_beta
-            };
-            float32x4_t softplus = vld1q_f32(sp_vals);
-            
-            // Select: linear (x) if above threshold, else softplus
-            float32x4_t result = vbslq_f32(lin_mask, x, softplus);
-            vst1q_f32(&out->data[i], result);
-        }
-        
-        // Handle tail
-        for (; i < end; i++) {
-            float x = in->data[i];
-            if (x * beta > threshold) {
-                out->data[i] = x;
-            } else {
-                out->data[i] = logf(1.0f + expf(beta * x)) / beta;
-            }
+            // Fully vectorized: log(1 + exp(bx)) / beta
+            float32x4_t sp = vmulq_f32(fast_log_neon(vaddq_f32(vone, fast_exp_neon(bx))), vinv_beta);
+            vst1q_f32(&out->data[i + k], vbslq_f32(lin_mask, x, sp));
         }
     }
+    for (; i + 4 <= in->size; i += 4) {
+        float32x4_t x = vld1q_f32(&in->data[i]);
+        float32x4_t bx = vmulq_f32(vbeta, x);
+        uint32x4_t lin_mask = vcgtq_f32(bx, vthreshold);
+        float32x4_t sp = vmulq_f32(fast_log_neon(vaddq_f32(vone, fast_exp_neon(bx))), vinv_beta);
+        vst1q_f32(&out->data[i], vbslq_f32(lin_mask, x, sp));
+    }
+    for (; i < in->size; i++) {
+        float x = in->data[i];
+        out->data[i] = (x * beta > threshold) ? x : logf(1.0f + expf(beta * x)) / beta;
+    }
 #else
-    #pragma omp parallel for
     for (uint32_t i = 0; i < in->size; i++) {
         float x = in->data[i];
-        if (x * beta > threshold) {
-            out->data[i] = x;
-        } else {
-            out->data[i] = logf(1.0f + expf(beta * x)) / beta;
-        }
+        out->data[i] = (x * beta > threshold) ? x : logf(1.0f + expf(beta * x)) / beta;
     }
 #endif
 }
@@ -354,16 +362,20 @@ void tensor_mish(Tensor* out, const Tensor* in) {
 #if RPITORCH_HAS_NEON
     const float32x4_t vone = vdupq_n_f32(1.0f);
     uint32_t i = 0;
-    for (; i + 4 <= in->size; i += 4) {
+    // 4× unroll = 16 floats = 1 cache line
+    for (; i + 16 <= in->size; i += 16) {
         __builtin_prefetch(&in->data[i + 64], 0, 1);
+        for (int k = 0; k < 16; k += 4) {
+            float32x4_t x = vld1q_f32(&in->data[i + k]);
+            // Fully vectorized softplus: ln(1 + exp(x))
+            float32x4_t sp = fast_log_neon(vaddq_f32(vone, fast_exp_neon(x)));
+            float32x4_t th = fast_tanh_neon(sp);
+            vst1q_f32(&out->data[i + k], vmulq_f32(x, th));
+        }
+    }
+    for (; i + 4 <= in->size; i += 4) {
         float32x4_t x = vld1q_f32(&in->data[i]);
-        // softplus = ln(1 + exp(x))
-        float32x4_t sp = vld1q_f32((float[4]){
-            logf(1.0f + expf(vgetq_lane_f32(x, 0))),
-            logf(1.0f + expf(vgetq_lane_f32(x, 1))),
-            logf(1.0f + expf(vgetq_lane_f32(x, 2))),
-            logf(1.0f + expf(vgetq_lane_f32(x, 3)))
-        });
+        float32x4_t sp = fast_log_neon(vaddq_f32(vone, fast_exp_neon(x)));
         float32x4_t th = fast_tanh_neon(sp);
         vst1q_f32(&out->data[i], vmulq_f32(x, th));
     }

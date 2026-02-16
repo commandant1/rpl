@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.10)
 project(rpl C)
 
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -Wall -fopenmp -march=native")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -Wall -fopenmp -march=native -fno-math-errno -freciprocal-math -fno-trapping-math -fno-signed-zeros -fassociative-math -funroll-loops -ftree-vectorize")
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)  # LTO
 
 # Optional: OpenBLAS support
 if(USE_OPENBLAS)

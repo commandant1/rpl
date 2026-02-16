@@ -27,8 +27,10 @@ void backward_sigmoid(Tensor* t);
 void backward_mse(Tensor* t);
 
 // ============================================================
-// Memory Management with Alignment
+// Memory Management — Thread-Local Slab Pool
 // ============================================================
+// Bins: 64B, 128B, 256B, 512B, 1KB, 2KB, 4KB, 8KB, 16KB, 32KB, 64KB
+// Above 64KB: fall through to posix_memalign (rare for ML workloads)
 
 void* rpitorch_aligned_alloc(size_t alignment, size_t size) {
     void* ptr = NULL;
@@ -37,6 +39,65 @@ void* rpitorch_aligned_alloc(size_t alignment, size_t size) {
 }
 
 void rpitorch_aligned_free(void* ptr) {
+    free(ptr);
+}
+
+#define POOL_NUM_BINS 11
+#define POOL_MAX_CACHED 64   // max slabs per bin per thread
+#define POOL_MIN_SIZE 64     // 64B = 1 cache line
+#define POOL_MAX_SIZE 65536  // 64KB
+
+typedef struct {
+    void* slabs[POOL_MAX_CACHED];
+    int count;
+    size_t slab_size;
+} PoolBin;
+
+static __thread PoolBin pool_bins[POOL_NUM_BINS];
+static __thread int pool_initialized = 0;
+
+static void pool_init(void) {
+    size_t sz = POOL_MIN_SIZE;
+    for (int i = 0; i < POOL_NUM_BINS; i++) {
+        pool_bins[i].count = 0;
+        pool_bins[i].slab_size = sz;
+        sz <<= 1;
+    }
+    pool_initialized = 1;
+}
+
+// Find bin index for a given size (or -1 if too large)
+static inline int pool_bin_index(size_t size) {
+    if (size > POOL_MAX_SIZE) return -1;
+    size_t s = POOL_MIN_SIZE;
+    for (int i = 0; i < POOL_NUM_BINS; i++) {
+        if (size <= s) return i;
+        s <<= 1;
+    }
+    return -1;
+}
+
+static inline void* pool_alloc(size_t size) {
+    if (!pool_initialized) pool_init();
+    int bin = pool_bin_index(size);
+    if (bin >= 0 && pool_bins[bin].count > 0) {
+        // Hot path: pop from free list (no syscall)
+        return pool_bins[bin].slabs[--pool_bins[bin].count];
+    }
+    // Cold path: allocate from system
+    size_t actual = (bin >= 0) ? pool_bins[bin].slab_size : size;
+    return rpitorch_aligned_alloc(64, actual);
+}
+
+static inline void pool_free(void* ptr, size_t size) {
+    if (!ptr) return;
+    if (!pool_initialized) { free(ptr); return; }
+    int bin = pool_bin_index(size);
+    if (bin >= 0 && pool_bins[bin].count < POOL_MAX_CACHED) {
+        // Hot path: return to free list (no syscall)
+        pool_bins[bin].slabs[pool_bins[bin].count++] = ptr;
+        return;
+    }
     free(ptr);
 }
 
@@ -55,14 +116,14 @@ Tensor* tensor_create(uint32_t dims, const uint32_t* shape, bool requires_grad) 
     t->strides[dims-1] = 1;
     for (int i = dims-2; i >= 0; i--) t->strides[i] = t->strides[i+1] * t->shape[i+1];
     
-    // Round up to cache line (64B) to prevent false sharing in OMP and
-    // ensure NEON loads never straddle cache line boundaries
+    // Round up to cache line (64B)
     size_t alloc_size = (t->size * sizeof(float) + 63) & ~(size_t)63;
-    t->_allocation = rpitorch_aligned_alloc(64, alloc_size);
+    t->_alloc_size = alloc_size;
+    t->_allocation = pool_alloc(alloc_size);
     t->data = (float*)t->_allocation;
     
     if (requires_grad) {
-        t->grad = (float*)rpitorch_aligned_alloc(64, alloc_size);
+        t->grad = (float*)pool_alloc(alloc_size);
         memset(t->grad, 0, alloc_size);
     }
     
@@ -73,8 +134,9 @@ Tensor* tensor_create(uint32_t dims, const uint32_t* shape, bool requires_grad) 
 
 void tensor_free(Tensor* t) {
     if (!t) return;
-    if (t->_allocation) free(t->_allocation);
-    if (t->grad) free(t->grad);
+    size_t alloc_size = t->_alloc_size;
+    if (t->_allocation) pool_free(t->_allocation, alloc_size);
+    if (t->grad) pool_free(t->grad, alloc_size);
     free(t);
 }
 
@@ -101,7 +163,7 @@ void tensor_fill(Tensor* t, float value) {
 }
 
 void tensor_randomize(Tensor* t) {
-    #pragma omp parallel for
+    #pragma omp parallel for if(t->size >= RPL_OMP_THRESHOLD)
     for (uint32_t i = 0; i < t->size; i++) {
         t->data[i] = ((float)rand() / RAND_MAX - 0.5f) * 2.0f;
     }
@@ -114,7 +176,7 @@ void tensor_add_out(Tensor* restrict out, const Tensor* restrict a, const Tensor
         const float* restrict pb = b->data;
         float* restrict po = out->data;
         
-        #pragma omp parallel for
+        #pragma omp parallel for if(out->size >= RPL_OMP_THRESHOLD)
         for (uint32_t base = 0; base < out->size; base += 512) {
             uint32_t end = (base + 512 < out->size) ? base + 512 : out->size;
             uint32_t i = base;
@@ -144,7 +206,7 @@ void tensor_add_out(Tensor* restrict out, const Tensor* restrict a, const Tensor
             for (; i < end; i++) po[i] = pa[i] + pb[i];
         }
 #else
-        #pragma omp parallel for
+        #pragma omp parallel for if(out->size >= RPL_OMP_THRESHOLD)
         for (uint32_t i = 0; i < out->size; i++) out->data[i] = a->data[i] + b->data[i];
 #endif
     } else {
@@ -175,7 +237,7 @@ void tensor_mul_out(Tensor* restrict out, const Tensor* restrict a, const Tensor
         const float* restrict pb = b->data;
         float* restrict po = out->data;
         
-        #pragma omp parallel for
+        #pragma omp parallel for if(out->size >= RPL_OMP_THRESHOLD)
         for (uint32_t base = 0; base < out->size; base += 512) {
             uint32_t end = (base + 512 < out->size) ? base + 512 : out->size;
             uint32_t i = base;

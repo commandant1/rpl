@@ -15,7 +15,7 @@ static inline Tensor* _like(const Tensor* t) {
 #define DEFINE_UNARY_OP(name, expr) \
 Tensor* tensor_##name(const Tensor* t) { \
     Tensor* out = _like(t); \
-    _Pragma("omp parallel for") \
+    _Pragma("omp parallel for if(t->size >= RPL_OMP_THRESHOLD)") \
     for (uint32_t i = 0; i < t->size; i++) { \
         float x = t->data[i]; \
         out->data[i] = (expr); \
@@ -23,7 +23,7 @@ Tensor* tensor_##name(const Tensor* t) { \
     return out; \
 } \
 void tensor_##name##_inplace(Tensor* t) { \
-    _Pragma("omp parallel for") \
+    _Pragma("omp parallel for if(t->size >= RPL_OMP_THRESHOLD)") \
     for (uint32_t i = 0; i < t->size; i++) { \
         float x = t->data[i]; \
         t->data[i] = (expr); \
@@ -33,7 +33,7 @@ void tensor_##name##_inplace(Tensor* t) { \
 #define DEFINE_BINARY_OP(name, expr) \
 Tensor* tensor_##name(const Tensor* a, const Tensor* b) { \
     Tensor* out = _like(a); \
-    _Pragma("omp parallel for") \
+    _Pragma("omp parallel for if(a->size >= RPL_OMP_THRESHOLD)") \
     for (uint32_t i = 0; i < a->size; i++) { \
         float x = a->data[i]; \
         float y = b->data[i % b->size]; \

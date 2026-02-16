@@ -42,6 +42,18 @@ typedef enum {
     #define RPITORCH_HAS_NEON 0
 #endif
 
+// OMP size threshold: skip thread spawn for small tensors
+// Thread creation costs ~50µs on Cortex-A72; at 1 FLOP/cycle,
+// 4096 floats takes ~2.7µs — below this, OMP overhead dominates
+#ifndef RPL_OMP_THRESHOLD
+#define RPL_OMP_THRESHOLD 4096
+#endif
+
+// Hot-path attribute for frequently-called functions
+#define RPL_HOT __attribute__((hot))
+#define RPL_LIKELY(x)   __builtin_expect(!!(x), 1)
+#define RPL_UNLIKELY(x) __builtin_expect(!!(x), 0)
+
 
 #ifdef USE_OPENBLAS
     #define RPITORCH_HAS_BLAS 1

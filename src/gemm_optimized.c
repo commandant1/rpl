@@ -135,9 +135,8 @@ static inline void pack_B_8(const float* B, float* Bp, int K, int N, int ldb) {
 }
 
 // 8x8 NEON micro-kernel with true FMA
-// Computes C[8x8] += A[8xK] @ B[Kx8]
 // Uses 16 accumulators (c00-c77) + 8 A-loads + 8 B-loads = 32 registers
-static inline void gemm_micro_kernel_8x8(
+static inline void __attribute__((hot)) gemm_micro_kernel_8x8(
     const float* restrict Ap,
     const float* restrict Bp,
     float* restrict C,
@@ -338,10 +337,25 @@ void gemm_optimized_cortex_a72(
 // Wrapper for tensor interface
 void parallel_gemm_optimized(const float* A, const float* B, float* C,
                              uint32_t M, uint32_t N, uint32_t K) {
-    // Small matrix: use simple scalar GEMM to avoid 8x8 micro-kernel overrun.
-    // The tiled kernel writes a full MR×NR (8×8) tile which corrupts memory
-    // when the output matrix is smaller than 8×8.
+    // Small matrix: NEON 4-wide for M<8 or N<8 (avoids 8x8 tile overrun)
     if (M < MR || N < NR) {
+#if RPITORCH_HAS_NEON
+        for (uint32_t i = 0; i < M; i++) {
+            uint32_t j = 0;
+            for (; j + 4 <= N; j += 4) {
+                float32x4_t sum = vdupq_n_f32(0.0f);
+                for (uint32_t k = 0; k < K; k++)
+                    sum = vfmaq_n_f32(sum, vld1q_f32(&B[k * N + j]), A[i * K + k]);
+                vst1q_f32(&C[i * N + j], vaddq_f32(vld1q_f32(&C[i * N + j]), sum));
+            }
+            for (; j < N; j++) {
+                float sum = 0;
+                for (uint32_t k = 0; k < K; k++)
+                    sum += A[i * K + k] * B[k * N + j];
+                C[i * N + j] += sum;
+            }
+        }
+#else
         for (uint32_t i = 0; i < M; i++)
             for (uint32_t j = 0; j < N; j++) {
                 float sum = 0;
@@ -349,6 +363,7 @@ void parallel_gemm_optimized(const float* A, const float* B, float* C,
                     sum += A[i * K + k] * B[k * N + j];
                 C[i * N + j] += sum;
             }
+#endif
         return;
     }
     gemm_optimized_cortex_a72(A, B, C, M, N, K, K, N, N);
