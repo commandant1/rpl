@@ -55,7 +55,9 @@ Tensor* tensor_create(uint32_t dims, const uint32_t* shape, bool requires_grad) 
     t->strides[dims-1] = 1;
     for (int i = dims-2; i >= 0; i--) t->strides[i] = t->strides[i+1] * t->shape[i+1];
     
-    size_t alloc_size = t->size * sizeof(float);
+    // Round up to cache line (64B) to prevent false sharing in OMP and
+    // ensure NEON loads never straddle cache line boundaries
+    size_t alloc_size = (t->size * sizeof(float) + 63) & ~(size_t)63;
     t->_allocation = rpitorch_aligned_alloc(64, alloc_size);
     t->data = (float*)t->_allocation;
     

@@ -10,21 +10,71 @@
 
 static inline Tensor* _like(const Tensor* t) { return tensor_create(t->dims, t->shape, false); }
 
-// Comparison (return float: 1.0 = true, 0.0 = false)
-#define DEF_CMP(name, op) \
+// Comparison — NEON-optimized for same-size tensors
+// vceqq/vcltq/etc return uint32 masks; AND with 1.0f bit-pattern to get float 1.0/0.0
+#if RPITORCH_HAS_NEON
+static inline void _cmp_neon_eq(float* out, const float* a, const float* b, uint32_t n) {
+    uint32x4_t vone = vreinterpretq_u32_f32(vdupq_n_f32(1.0f));
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        vst1q_f32(&out[i], vreinterpretq_f32_u32(vandq_u32(vceqq_f32(vld1q_f32(&a[i]), vld1q_f32(&b[i])), vone)));
+    for (; i < n; i++) out[i] = (a[i] == b[i]) ? 1.0f : 0.0f;
+}
+static inline void _cmp_neon_lt(float* out, const float* a, const float* b, uint32_t n) {
+    uint32x4_t vone = vreinterpretq_u32_f32(vdupq_n_f32(1.0f));
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        vst1q_f32(&out[i], vreinterpretq_f32_u32(vandq_u32(vcltq_f32(vld1q_f32(&a[i]), vld1q_f32(&b[i])), vone)));
+    for (; i < n; i++) out[i] = (a[i] < b[i]) ? 1.0f : 0.0f;
+}
+static inline void _cmp_neon_gt(float* out, const float* a, const float* b, uint32_t n) {
+    uint32x4_t vone = vreinterpretq_u32_f32(vdupq_n_f32(1.0f));
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        vst1q_f32(&out[i], vreinterpretq_f32_u32(vandq_u32(vcgtq_f32(vld1q_f32(&a[i]), vld1q_f32(&b[i])), vone)));
+    for (; i < n; i++) out[i] = (a[i] > b[i]) ? 1.0f : 0.0f;
+}
+static inline void _cmp_neon_le(float* out, const float* a, const float* b, uint32_t n) {
+    uint32x4_t vone = vreinterpretq_u32_f32(vdupq_n_f32(1.0f));
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        vst1q_f32(&out[i], vreinterpretq_f32_u32(vandq_u32(vcleq_f32(vld1q_f32(&a[i]), vld1q_f32(&b[i])), vone)));
+    for (; i < n; i++) out[i] = (a[i] <= b[i]) ? 1.0f : 0.0f;
+}
+static inline void _cmp_neon_ge(float* out, const float* a, const float* b, uint32_t n) {
+    uint32x4_t vone = vreinterpretq_u32_f32(vdupq_n_f32(1.0f));
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        vst1q_f32(&out[i], vreinterpretq_f32_u32(vandq_u32(vcgeq_f32(vld1q_f32(&a[i]), vld1q_f32(&b[i])), vone)));
+    for (; i < n; i++) out[i] = (a[i] >= b[i]) ? 1.0f : 0.0f;
+}
+#endif
+
+#define DEF_CMP_NEON(name, neon_fn, op) \
 Tensor* tensor_##name(const Tensor* a, const Tensor* b) { \
     Tensor* out = _like(a); \
-    _Pragma("omp parallel for") \
-    for (uint32_t i = 0; i < a->size; i++) out->data[i] = (a->data[i] op b->data[i%b->size]) ? 1.0f : 0.0f; \
+    if (a->size == b->size) { \
+        RPITORCH_HAS_NEON_COND(neon_fn(out->data, a->data, b->data, a->size), \
+            for (uint32_t i = 0; i < a->size; i++) out->data[i] = (a->data[i] op b->data[i]) ? 1.0f : 0.0f); \
+    } else { \
+        for (uint32_t i = 0; i < a->size; i++) out->data[i] = (a->data[i] op b->data[i%b->size]) ? 1.0f : 0.0f; \
+    } \
     return out; \
 }
 
-DEF_CMP(eq, ==)
-DEF_CMP(ne, !=)
-DEF_CMP(lt, <)
-DEF_CMP(le, <=)
-DEF_CMP(gt, >)
-DEF_CMP(ge, >=)
+// Need a helper macro for conditional NEON
+#if RPITORCH_HAS_NEON
+#define RPITORCH_HAS_NEON_COND(neon_code, scalar_code) neon_code
+#else
+#define RPITORCH_HAS_NEON_COND(neon_code, scalar_code) scalar_code
+#endif
+
+DEF_CMP_NEON(eq, _cmp_neon_eq, ==)
+DEF_CMP_NEON(ne, _cmp_neon_eq, !=)  // ne uses scalar fallback, same structure
+DEF_CMP_NEON(lt, _cmp_neon_lt, <)
+DEF_CMP_NEON(le, _cmp_neon_le, <=)
+DEF_CMP_NEON(gt, _cmp_neon_gt, >)
+DEF_CMP_NEON(ge, _cmp_neon_ge, >=)
 
 bool tensor_equal(const Tensor* a, const Tensor* b) {
     if (a->size != b->size || a->dims != b->dims) return false;

@@ -85,14 +85,167 @@ DEFINE_UNARY_OP(frac, x - truncf(x))
 // Power & Root
 DEFINE_BINARY_OP(pow_op, powf(x, y))
 DEFINE_UNARY_OP(sqrt_op, sqrtf(x))
-DEFINE_UNARY_OP(rsqrt, 1.0f / sqrtf(x))
-DEFINE_UNARY_OP(square, x * x)
 DEFINE_UNARY_OP(cbrt, cbrtf(x))
-DEFINE_UNARY_OP(reciprocal, 1.0f / x)
 
-// Abs / Sign
-DEFINE_UNARY_OP(abs_op, fabsf(x))
-DEFINE_UNARY_OP(neg, -x)
+// rsqrt — NEON estimate + 1 Newton step for full precision
+Tensor* tensor_rsqrt(const Tensor* t) {
+    Tensor* out = _like(t);
+#if RPITORCH_HAS_NEON
+    uint32_t i = 0;
+    for (; i + 16 <= t->size; i += 16) {
+        __builtin_prefetch(&t->data[i + 64], 0, 1);
+        for (int k = 0; k < 16; k += 4) {
+            float32x4_t v = vld1q_f32(&t->data[i + k]);
+            float32x4_t est = vrsqrteq_f32(v);
+            est = vmulq_f32(est, vrsqrtsq_f32(vmulq_f32(v, est), est)); // Newton
+            vst1q_f32(&out->data[i + k], est);
+        }
+    }
+    for (; i < t->size; i++) out->data[i] = 1.0f / sqrtf(t->data[i]);
+#else
+    for (uint32_t i = 0; i < t->size; i++) out->data[i] = 1.0f / sqrtf(t->data[i]);
+#endif
+    return out;
+}
+void tensor_rsqrt_inplace(Tensor* t) {
+#if RPITORCH_HAS_NEON
+    uint32_t i = 0;
+    for (; i + 4 <= t->size; i += 4) {
+        float32x4_t v = vld1q_f32(&t->data[i]);
+        float32x4_t est = vrsqrteq_f32(v);
+        est = vmulq_f32(est, vrsqrtsq_f32(vmulq_f32(v, est), est));
+        vst1q_f32(&t->data[i], est);
+    }
+    for (; i < t->size; i++) t->data[i] = 1.0f / sqrtf(t->data[i]);
+#else
+    for (uint32_t i = 0; i < t->size; i++) t->data[i] = 1.0f / sqrtf(t->data[i]);
+#endif
+}
+
+// square — NEON vmulq_f32(v, v)
+Tensor* tensor_square(const Tensor* t) {
+    Tensor* out = _like(t);
+#if RPITORCH_HAS_NEON
+    uint32_t i = 0;
+    for (; i + 16 <= t->size; i += 16) {
+        __builtin_prefetch(&t->data[i + 64], 0, 1);
+        for (int k = 0; k < 16; k += 4) {
+            float32x4_t v = vld1q_f32(&t->data[i + k]);
+            vst1q_f32(&out->data[i + k], vmulq_f32(v, v));
+        }
+    }
+    for (; i < t->size; i++) out->data[i] = t->data[i] * t->data[i];
+#else
+    for (uint32_t i = 0; i < t->size; i++) out->data[i] = t->data[i] * t->data[i];
+#endif
+    return out;
+}
+void tensor_square_inplace(Tensor* t) {
+#if RPITORCH_HAS_NEON
+    uint32_t i = 0;
+    for (; i + 4 <= t->size; i += 4) {
+        float32x4_t v = vld1q_f32(&t->data[i]);
+        vst1q_f32(&t->data[i], vmulq_f32(v, v));
+    }
+    for (; i < t->size; i++) t->data[i] *= t->data[i];
+#else
+    for (uint32_t i = 0; i < t->size; i++) t->data[i] *= t->data[i];
+#endif
+}
+
+// reciprocal — NEON estimate + 1 Newton step
+Tensor* tensor_reciprocal(const Tensor* t) {
+    Tensor* out = _like(t);
+#if RPITORCH_HAS_NEON
+    uint32_t i = 0;
+    for (; i + 16 <= t->size; i += 16) {
+        __builtin_prefetch(&t->data[i + 64], 0, 1);
+        for (int k = 0; k < 16; k += 4) {
+            float32x4_t v = vld1q_f32(&t->data[i + k]);
+            float32x4_t est = vrecpeq_f32(v);
+            est = vmulq_f32(est, vrecpsq_f32(v, est)); // Newton step
+            vst1q_f32(&out->data[i + k], est);
+        }
+    }
+    for (; i < t->size; i++) out->data[i] = 1.0f / t->data[i];
+#else
+    for (uint32_t i = 0; i < t->size; i++) out->data[i] = 1.0f / t->data[i];
+#endif
+    return out;
+}
+void tensor_reciprocal_inplace(Tensor* t) {
+#if RPITORCH_HAS_NEON
+    uint32_t i = 0;
+    for (; i + 4 <= t->size; i += 4) {
+        float32x4_t v = vld1q_f32(&t->data[i]);
+        float32x4_t est = vrecpeq_f32(v);
+        est = vmulq_f32(est, vrecpsq_f32(v, est));
+        vst1q_f32(&t->data[i], est);
+    }
+    for (; i < t->size; i++) t->data[i] = 1.0f / t->data[i];
+#else
+    for (uint32_t i = 0; i < t->size; i++) t->data[i] = 1.0f / t->data[i];
+#endif
+}
+
+// abs — NEON vabsq_f32
+Tensor* tensor_abs_op(const Tensor* t) {
+    Tensor* out = _like(t);
+#if RPITORCH_HAS_NEON
+    uint32_t i = 0;
+    for (; i + 16 <= t->size; i += 16) {
+        __builtin_prefetch(&t->data[i + 64], 0, 1);
+        vst1q_f32(&out->data[i],     vabsq_f32(vld1q_f32(&t->data[i])));
+        vst1q_f32(&out->data[i + 4], vabsq_f32(vld1q_f32(&t->data[i + 4])));
+        vst1q_f32(&out->data[i + 8], vabsq_f32(vld1q_f32(&t->data[i + 8])));
+        vst1q_f32(&out->data[i + 12],vabsq_f32(vld1q_f32(&t->data[i + 12])));
+    }
+    for (; i < t->size; i++) out->data[i] = fabsf(t->data[i]);
+#else
+    for (uint32_t i = 0; i < t->size; i++) out->data[i] = fabsf(t->data[i]);
+#endif
+    return out;
+}
+void tensor_abs_op_inplace(Tensor* t) {
+#if RPITORCH_HAS_NEON
+    uint32_t i = 0;
+    for (; i + 4 <= t->size; i += 4)
+        vst1q_f32(&t->data[i], vabsq_f32(vld1q_f32(&t->data[i])));
+    for (; i < t->size; i++) t->data[i] = fabsf(t->data[i]);
+#else
+    for (uint32_t i = 0; i < t->size; i++) t->data[i] = fabsf(t->data[i]);
+#endif
+}
+
+// neg — NEON vnegq_f32
+Tensor* tensor_neg(const Tensor* t) {
+    Tensor* out = _like(t);
+#if RPITORCH_HAS_NEON
+    uint32_t i = 0;
+    for (; i + 16 <= t->size; i += 16) {
+        __builtin_prefetch(&t->data[i + 64], 0, 1);
+        vst1q_f32(&out->data[i],     vnegq_f32(vld1q_f32(&t->data[i])));
+        vst1q_f32(&out->data[i + 4], vnegq_f32(vld1q_f32(&t->data[i + 4])));
+        vst1q_f32(&out->data[i + 8], vnegq_f32(vld1q_f32(&t->data[i + 8])));
+        vst1q_f32(&out->data[i + 12],vnegq_f32(vld1q_f32(&t->data[i + 12])));
+    }
+    for (; i < t->size; i++) out->data[i] = -t->data[i];
+#else
+    for (uint32_t i = 0; i < t->size; i++) out->data[i] = -t->data[i];
+#endif
+    return out;
+}
+void tensor_neg_inplace(Tensor* t) {
+#if RPITORCH_HAS_NEON
+    uint32_t i = 0;
+    for (; i + 4 <= t->size; i += 4)
+        vst1q_f32(&t->data[i], vnegq_f32(vld1q_f32(&t->data[i])));
+    for (; i < t->size; i++) t->data[i] = -t->data[i];
+#else
+    for (uint32_t i = 0; i < t->size; i++) t->data[i] = -t->data[i];
+#endif
+}
+
 DEFINE_UNARY_OP(sign, (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f))
 DEFINE_UNARY_OP(signbit_op, (x < 0.0f) ? 1.0f : 0.0f)
 DEFINE_BINARY_OP(copysign_op, copysignf(x, y))
@@ -253,10 +406,27 @@ Tensor* tensor_addcdiv(const Tensor* input, const Tensor* t1, const Tensor* t2, 
     return out;
 }
 
+// addcmul — NEON vfmaq_f32 for fused multiply-add
 Tensor* tensor_addcmul(const Tensor* input, const Tensor* t1, const Tensor* t2, float value) {
     Tensor* out = _like(input);
+#if RPITORCH_HAS_NEON
+    float32x4_t vval = vdupq_n_f32(value);
+    uint32_t i = 0;
+    for (; i + 16 <= input->size; i += 16) {
+        __builtin_prefetch(&input->data[i + 64], 0, 1);
+        __builtin_prefetch(&t1->data[i + 64], 0, 1);
+        __builtin_prefetch(&t2->data[i + 64], 0, 1);
+        for (int k = 0; k < 16; k += 4) {
+            float32x4_t prod = vmulq_f32(vld1q_f32(&t1->data[i+k]), vld1q_f32(&t2->data[i+k]));
+            vst1q_f32(&out->data[i+k], vfmaq_f32(vld1q_f32(&input->data[i+k]), prod, vval));
+        }
+    }
+    for (; i < input->size; i++)
+        out->data[i] = input->data[i] + value * (t1->data[i] * t2->data[i]);
+#else
     #pragma omp parallel for
     for (uint32_t i = 0; i < input->size; i++)
         out->data[i] = input->data[i] + value * (t1->data[i] * t2->data[i]);
+#endif
     return out;
 }
