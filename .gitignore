@@ -1,9 +1,14 @@
 # Build artifacts
 build/
+build_*/
 bin/
 lib/
 *.so
 *.a
+
+# Compiled binaries
+check_sizes
+reproduce_issue.py
 
 # Python
 __pycache__/

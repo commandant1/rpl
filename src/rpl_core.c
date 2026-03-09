@@ -179,10 +179,15 @@ void tensor_randomize(Tensor* t) {
 void tensor_add_out(Tensor* out, const Tensor* a, const Tensor* b) {
     if (a->size == b->size && out->size == a->size) {
 #ifdef USE_GPU
-        if (a->device == DEVICE_GPU || b->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        if ((a->device == DEVICE_GPU || b->device == DEVICE_GPU || out->device == DEVICE_GPU)
+                && RPL_GPU_PREFERABLE(out->size)) {
             tensor_add_gpu(out, a, b);
             goto finalize;
         }
+        // Below threshold: pull data back to CPU
+        if (a->device == DEVICE_GPU) tensor_from_gpu((Tensor*)a);
+        if (b->device == DEVICE_GPU) tensor_from_gpu((Tensor*)b);
+        if (out->device == DEVICE_GPU) tensor_from_gpu(out);
 #endif
 
 #if RPITORCH_HAS_NEON
@@ -254,10 +259,15 @@ Tensor* tensor_add(const Tensor* a, const Tensor* b) {
 void tensor_mul_out(Tensor* out, const Tensor* a, const Tensor* b) {
     if (a->size == b->size && out->size == a->size) {
 #ifdef USE_GPU
-        if (a->device == DEVICE_GPU || b->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        if ((a->device == DEVICE_GPU || b->device == DEVICE_GPU || out->device == DEVICE_GPU)
+                && RPL_GPU_PREFERABLE(out->size)) {
             tensor_mul_gpu(out, a, b);
             goto finalize;
         }
+        // Below threshold: pull data back to CPU
+        if (a->device == DEVICE_GPU) tensor_from_gpu((Tensor*)a);
+        if (b->device == DEVICE_GPU) tensor_from_gpu((Tensor*)b);
+        if (out->device == DEVICE_GPU) tensor_from_gpu(out);
 #endif
 
 #if RPITORCH_HAS_NEON
@@ -353,73 +363,113 @@ void tensor_gemm(Tensor* C, const Tensor* A, const Tensor* B,
     uint32_t N = trans_b ? B->shape[0] : B->shape[1];
 
 #ifdef USE_GPU
-    if (A->device == DEVICE_GPU || B->device == DEVICE_GPU || C->device == DEVICE_GPU) {
-        if (!trans_a && !trans_b && alpha == 1.0f && beta == 0.0f) {
-            tensor_matmul_gpu(C, A, B);
-            return;
-        } else {
-            tensor_from_gpu((Tensor*)A);
-            tensor_from_gpu((Tensor*)B);
-            tensor_from_gpu(C);
-        }
+    // FLOPs-based threshold: GPU wins only when M*N*K exceeds the kernel-launch
+    // overhead (~100-500µs on VideoCore VI).  Handles ALL trans/alpha/beta variants.
+    if (RPL_GPU_GEMM_PREFERABLE(M, N, K) &&
+        (A->device == DEVICE_GPU || B->device == DEVICE_GPU || C->device == DEVICE_GPU)) {
+        tensor_gemm_gpu(C, A, B, M, N, K, alpha, beta, trans_a, trans_b);
+        return;
     }
+    // Below FLOPs threshold or no GPU tensor — pull data to CPU.
+    if (A->device == DEVICE_GPU) tensor_from_gpu((Tensor*)A);
+    if (B->device == DEVICE_GPU) tensor_from_gpu((Tensor*)B);
+    if (C->device == DEVICE_GPU) tensor_from_gpu(C);
 #endif
 
-    
-    // Fast path: non-transposed A, transposed B (common for linear layers: A @ B^T)
-    // Use optimized GEMM for better performance
-    if (!trans_a && trans_b && alpha == 1.0f && beta == 0.0f) {
-        // Need to transpose B temporarily for our row-major optimized GEMM
-        // For now, we'll use the vectorized loop below which handles trans_b
-    }
-    
-    // Non-transposed case: use optimized GEMM
+    // Fast path: non-transposed A, non-transposed B (no scaling variant)
     if (!trans_a && !trans_b && alpha == 1.0f && beta == 0.0f) {
         tensor_fill(C, 0.0f);
         parallel_gemm_optimized(A->data, B->data, C->data, M, N, K);
         return;
     }
+
+    // General path: apply beta scaling to C first, then accumulate alpha*A@B.
+    // When beta == 0 we zero C; when beta != 0 we scale in-place.
+    if (beta == 0.0f) {
+        tensor_fill(C, 0.0f);
+    } else if (beta != 1.0f) {
+        for (uint32_t i = 0; i < C->size; i++) C->data[i] *= beta;
+    }
+
+    // CPU fast path for !trans_a + trans_b (linear layer: out = input @ W^T).
+    // Materialise B^T then call the optimized kernel; skip the element loop.
+    if (!trans_a && trans_b && alpha == 1.0f) {
+        // Allocate transposed copy of B: [N × K] → [K × N]
+        float* Bt = (float*)rpitorch_aligned_alloc(64, (size_t)K * N * sizeof(float));
+        if (Bt) {
+            #pragma omp parallel for collapse(2) schedule(static)
+            for (uint32_t j = 0; j < N; j++)
+                for (uint32_t k = 0; k < K; k++)
+                    Bt[k * N + j] = B->data[j * K + k];
+            parallel_gemm_optimized(A->data, Bt, C->data, M, N, K);
+            rpitorch_aligned_free(Bt);
+            return;
+        }
+        // Fallthrough to general loop if alloc failed
+    }
+
+    // Non-transposed A + non-transposed B with alpha scaling
+    if (!trans_a && !trans_b) {
+        if (alpha == 1.0f) {
+            parallel_gemm_optimized(A->data, B->data, C->data, M, N, K);
+            return;
+        }
+    }
+
     
-    // General case with support for transpose and alpha/beta scaling
+    // General case: support transpose and alpha/beta scaling.
+    // A is stored row-major [rows_A × cols_A].  When trans_a:
+    //   rows_A = K, cols_A = M  → lda_A = M
+    // When !trans_a:
+    //   rows_A = M, cols_A = K  → lda_A = K
+    // Accessing element (i_row, k_col) of logical A:
+    //   !trans_a: A->data[i * K + k]
+    //    trans_a: A->data[k * M + i]   (reading column k of A^T = row k of A)
+    // Similarly for B:
+    //   !trans_b: B->data[k * N + j]
+    //    trans_b: B->data[j * K + k]
 #if RPITORCH_HAS_NEON
-    #pragma omp parallel for collapse(2)
+    #pragma omp parallel for collapse(2) schedule(static)
     for (uint32_t i = 0; i < M; i++) {
         for (uint32_t j = 0; j < N; j++) {
             float32x4_t vsum = vdupq_n_f32(0.0f);
             uint32_t k = 0;
-            
+
             for (; k + 4 <= K; k += 4) {
-                float a_vals[4], b_vals[4];
-                for (int kk = 0; kk < 4; kk++) {
-                    a_vals[kk] = trans_a ? A->data[(k+kk)*M + i] : A->data[i*K + k+kk];
-                    b_vals[kk] = trans_b ? B->data[j*K + k+kk] : B->data[(k+kk)*N + j];
-                }
-                float32x4_t va = vld1q_f32(a_vals);
-                float32x4_t vb = vld1q_f32(b_vals);
+                float a0 = trans_a ? A->data[(k+0)*M + i] : A->data[i*K + k+0];
+                float a1 = trans_a ? A->data[(k+1)*M + i] : A->data[i*K + k+1];
+                float a2 = trans_a ? A->data[(k+2)*M + i] : A->data[i*K + k+2];
+                float a3 = trans_a ? A->data[(k+3)*M + i] : A->data[i*K + k+3];
+                float b0 = trans_b ? B->data[j*K + k+0] : B->data[(k+0)*N + j];
+                float b1 = trans_b ? B->data[j*K + k+1] : B->data[(k+1)*N + j];
+                float b2 = trans_b ? B->data[j*K + k+2] : B->data[(k+2)*N + j];
+                float b3 = trans_b ? B->data[j*K + k+3] : B->data[(k+3)*N + j];
+                float32x4_t va = {a0, a1, a2, a3};
+                float32x4_t vb = {b0, b1, b2, b3};
                 vsum = vfmaq_f32(vsum, va, vb);
             }
-            
+
             float sum = vaddvq_f32(vsum);
             for (; k < K; k++) {
-                float va = trans_a ? A->data[k*M + i] : A->data[i*K + k];
-                float vb = trans_b ? B->data[j*K + k] : B->data[k*N + j];
-                sum += va * vb;
+                float a_val = trans_a ? A->data[k*M + i] : A->data[i*K + k];
+                float b_val = trans_b ? B->data[j*K + k] : B->data[k*N + j];
+                sum += a_val * b_val;
             }
-            
-            C->data[i * N + j] = alpha * sum + beta * C->data[i*N + j];
+
+            C->data[i * N + j] += alpha * sum;
         }
     }
 #else
-    #pragma omp parallel for collapse(2)
+    #pragma omp parallel for collapse(2) schedule(static)
     for (uint32_t i = 0; i < M; i++) {
         for (uint32_t j = 0; j < N; j++) {
-            float sum = 0;
+            float sum = 0.0f;
             for (uint32_t k = 0; k < K; k++) {
-                float va = trans_a ? A->data[k*M + i] : A->data[i*K + k];
-                float vb = trans_b ? B->data[j*K + k] : B->data[k*N + j];
-                sum += va * vb;
+                float a_val = trans_a ? A->data[k*M + i] : A->data[i*K + k];
+                float b_val = trans_b ? B->data[j*K + k] : B->data[k*N + j];
+                sum += a_val * b_val;
             }
-            C->data[i * N + j] = alpha * sum + beta * C->data[i*N + j];
+            C->data[i * N + j] += alpha * sum;
         }
     }
 #endif
@@ -430,6 +480,13 @@ void tensor_gemm(Tensor* C, const Tensor* A, const Tensor* B,
 // ============================================================
 
 void tensor_relu_inplace(Tensor* t) {
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU && RPL_GPU_PREFERABLE(t->size)) {
+        tensor_relu_inplace_gpu(t);
+        return;
+    }
+    if (t->device == DEVICE_GPU) tensor_from_gpu(t);
+#endif
 #if RPITORCH_HAS_NEON
     const float32x4_t vzero = vdupq_n_f32(0.0f);
     
@@ -468,6 +525,13 @@ void tensor_relu_inplace(Tensor* t) {
 }
 
 void tensor_sigmoid_inplace(Tensor* t) {
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU && RPL_GPU_PREFERABLE(t->size)) {
+        tensor_sigmoid_gpu(t, t);
+        return;
+    }
+    if (t->device == DEVICE_GPU) tensor_from_gpu(t);
+#endif
 #if RPITORCH_HAS_NEON
     // Fast sigmoid using polynomial approximation
     const float32x4_t LOG2E = vdupq_n_f32(1.442695040f);
@@ -526,10 +590,12 @@ void tensor_sigmoid_inplace(Tensor* t) {
 Tensor* tensor_relu(const Tensor* t) {
     Tensor* out = tensor_create(t->dims, t->shape, t->requires_grad);
 #ifdef USE_GPU
-    if (t->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+    if ((t->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(t->size)) {
         tensor_relu_gpu(out, t);
         goto finalize;
     }
+    if (t->device == DEVICE_GPU) tensor_from_gpu((Tensor*)t);
 #endif
     
     #if RPITORCH_HAS_NEON
@@ -560,10 +626,12 @@ finalize:
 Tensor* tensor_sigmoid(const Tensor* t) {
     Tensor* out = tensor_create(t->dims, t->shape, t->requires_grad);
 #ifdef USE_GPU
-    if (t->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+    if ((t->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(t->size)) {
         tensor_sigmoid_gpu(out, t);
         goto finalize;
     }
+    if (t->device == DEVICE_GPU) tensor_from_gpu((Tensor*)t);
 #endif
     
 #if RPITORCH_HAS_NEON
@@ -787,6 +855,9 @@ void tensor_zero_grad(Tensor* t) {
 // Placeholders for other things used in the library
 void tensor_add_inplace(Tensor* a, const Tensor* b) { tensor_add_out(a, a, b); }
 void tensor_mul_inplace(Tensor* a, float scalar) {
+#ifdef USE_GPU
+    if (a->device == DEVICE_GPU) { tensor_scale_gpu(a, scalar); return; }
+#endif
     for (uint32_t i = 0; i < a->size; i++) a->data[i] *= scalar;
 }
 void tensor_fill_buffer(float* buffer, float value, uint32_t size) {
@@ -849,6 +920,12 @@ void tensor_gelu_inplace(Tensor* t) {
     // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     const float SQRT_2_PI = 0.7978845608f;  // sqrt(2/pi)
     const float A = 0.044715f;
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU) {
+        tensor_gelu_gpu(t, t);
+        return;
+    }
+#endif
     
 #if RPITORCH_HAS_NEON
     const float32x4_t HALF = vdupq_n_f32(0.5f);

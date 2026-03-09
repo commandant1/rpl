@@ -52,6 +52,36 @@ void tensor_free_gpu(struct Tensor* t);
 #define RPL_OMP_THRESHOLD 4096
 #endif
 
+// GPU dispatch threshold: for tensors smaller than this, GPU overhead
+// (GLES compute shader kernel launch + SSBO round-trip latency ≈ 100–500µs)
+// exceeds the cost of a NEON/OpenMP CPU kernel.  Only dispatch to GPU when
+// the tensor is large enough to amortise that overhead.
+// Rule of thumb on Raspberry Pi 4 VideoCore VI: GPU wins for >16 K elements.
+// Override at build time: -DRPL_GPU_THRESHOLD=<n>
+#ifndef RPL_GPU_THRESHOLD
+#define RPL_GPU_THRESHOLD 16384
+#endif
+
+// Element-count check: used for pointwise/unary/binary ops.
+#ifdef USE_GPU
+#  define RPL_GPU_PREFERABLE(size) ((size) >= (uint32_t)RPL_GPU_THRESHOLD)
+#else
+#  define RPL_GPU_PREFERABLE(size) (false)
+#endif
+
+// FLOPs-based check for GEMM: GPU overhead is amortised only once the
+// arithmetic intensity (M*N*K multiply-adds) is large enough.
+// Default: require at least 4M FLOPs (e.g. 128x128x256 or 256x256x64).
+#ifndef RPL_GPU_GEMM_FLOP_THRESHOLD
+#define RPL_GPU_GEMM_FLOP_THRESHOLD 4194304ULL   /* 4M */
+#endif
+#ifdef USE_GPU
+#  define RPL_GPU_GEMM_PREFERABLE(m,n,k) \
+      (((uint64_t)(m) * (uint64_t)(n) * (uint64_t)(k)) >= RPL_GPU_GEMM_FLOP_THRESHOLD)
+#else
+#  define RPL_GPU_GEMM_PREFERABLE(m,n,k) (false)
+#endif
+
 // Hot-path attribute for frequently-called functions
 #define RPL_HOT __attribute__((hot))
 #define RPL_LIKELY(x)   __builtin_expect(!!(x), 1)
@@ -121,15 +151,95 @@ bool rpl_gpu_init();
 void rpl_gpu_shutdown();
 void tensor_to_gpu(Tensor* t);
 void tensor_from_gpu(Tensor* t);
+void tensor_free_gpu(Tensor* t);
 void tensor_add_gpu(Tensor* out, const Tensor* a, const Tensor* b);
 void tensor_sub_gpu(Tensor* out, const Tensor* a, const Tensor* b);
 void tensor_mul_gpu(Tensor* out, const Tensor* a, const Tensor* b);
 void tensor_div_gpu(Tensor* out, const Tensor* a, const Tensor* b);
 void tensor_matmul_gpu(Tensor* C, const Tensor* A, const Tensor* B);
+/* Full GEMM with optional transpose and scaling: C = alpha*op(A)@op(B) + beta*C */
+void tensor_gemm_gpu(Tensor* C, const Tensor* A, const Tensor* B,
+                     uint32_t M, uint32_t N, uint32_t K,
+                     float alpha, float beta, bool trans_a, bool trans_b);
+// Element-wise activations (out-of-place)
 void tensor_relu_gpu(Tensor* out, const Tensor* in);
 void tensor_sigmoid_gpu(Tensor* out, const Tensor* in);
 void tensor_tanh_gpu(Tensor* out, const Tensor* in);
 void tensor_gelu_gpu(Tensor* out, const Tensor* in);
+void tensor_leaky_relu_gpu(Tensor* out, const Tensor* in, float negative_slope);
+void tensor_swish_gpu(Tensor* out, const Tensor* in);
+void tensor_elu_gpu(Tensor* out, const Tensor* in, float alpha);
+// In-place activations
+void tensor_relu_inplace_gpu(Tensor* t);
+// Softmax (axis = dimension to normalise over; 1 for row-wise on 2-D tensors)
+void tensor_softmax_gpu(Tensor* out, const Tensor* in, uint32_t axis);
+// Conv2D via GL_TEXTURE_2D sampling
+// in  : [C_in,  H,   W]   (NCHW, one image at a time)
+// kern: [C_out, C_in, kH, kW]
+// out : [C_out, out_H, out_W]
+void tensor_conv2d_gpu(Tensor* out, const Tensor* in, const Tensor* kern,
+                       int kH, int kW, int stride, int padding);
+void tensor_selu_gpu(Tensor* out, const Tensor* in);
+void tensor_mish_gpu(Tensor* out, const Tensor* in);
+void tensor_hardswish_gpu(Tensor* out, const Tensor* in);
+void tensor_hardsigmoid_gpu(Tensor* out, const Tensor* in);
+void tensor_softplus_gpu(Tensor* out, const Tensor* in, float beta, float threshold);
+void tensor_log_softmax_gpu(Tensor* out, const Tensor* in);
+void tensor_scale_gpu(Tensor* t, float scalar);
+// Math unary GPU ops (shared GLSL program, uniform int op selector)
+void tensor_sin_gpu(Tensor* out, const Tensor* in);
+void tensor_cos_gpu(Tensor* out, const Tensor* in);
+void tensor_tan_gpu(Tensor* out, const Tensor* in);
+void tensor_asin_gpu(Tensor* out, const Tensor* in);
+void tensor_acos_gpu(Tensor* out, const Tensor* in);
+void tensor_atan_gpu(Tensor* out, const Tensor* in);
+void tensor_sinh_gpu(Tensor* out, const Tensor* in);
+void tensor_cosh_gpu(Tensor* out, const Tensor* in);
+void tensor_asinh_gpu(Tensor* out, const Tensor* in);
+void tensor_acosh_gpu(Tensor* out, const Tensor* in);
+void tensor_atanh_gpu(Tensor* out, const Tensor* in);
+void tensor_exp_gpu(Tensor* out, const Tensor* in);
+void tensor_exp2_gpu(Tensor* out, const Tensor* in);
+void tensor_expm1_gpu(Tensor* out, const Tensor* in);
+void tensor_log_gpu(Tensor* out, const Tensor* in);
+void tensor_log2_gpu(Tensor* out, const Tensor* in);
+void tensor_log10_gpu(Tensor* out, const Tensor* in);
+void tensor_log1p_gpu(Tensor* out, const Tensor* in);
+void tensor_sqrt_gpu(Tensor* out, const Tensor* in);
+void tensor_rsqrt_gpu(Tensor* out, const Tensor* in);
+void tensor_square_gpu(Tensor* out, const Tensor* in);
+void tensor_cbrt_gpu(Tensor* out, const Tensor* in);
+void tensor_reciprocal_gpu(Tensor* out, const Tensor* in);
+void tensor_abs_gpu(Tensor* out, const Tensor* in);
+void tensor_neg_gpu(Tensor* out, const Tensor* in);
+void tensor_sign_gpu(Tensor* out, const Tensor* in);
+void tensor_deg2rad_gpu(Tensor* out, const Tensor* in);
+void tensor_rad2deg_gpu(Tensor* out, const Tensor* in);
+void tensor_erf_gpu(Tensor* out, const Tensor* in);
+void tensor_logit_gpu(Tensor* out, const Tensor* in);
+void tensor_round_gpu(Tensor* out, const Tensor* in);
+void tensor_floor_gpu(Tensor* out, const Tensor* in);
+void tensor_ceil_gpu(Tensor* out, const Tensor* in);
+void tensor_trunc_gpu(Tensor* out, const Tensor* in);
+void tensor_frac_gpu(Tensor* out, const Tensor* in);
+// Math binary GPU ops
+void tensor_pow_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+void tensor_atan2_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+void tensor_hypot_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+void tensor_fmod_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+void tensor_remainder_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+void tensor_floor_divide_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+void tensor_maximum_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+void tensor_minimum_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+void tensor_logaddexp_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+void tensor_logaddexp2_gpu(Tensor* out, const Tensor* a, const Tensor* b);
+// Clamp / remaining activations GPU
+void tensor_clamp_gpu(Tensor* out, const Tensor* in, float lo, float hi);
+void tensor_hardtanh_gpu(Tensor* out, const Tensor* in, float min_val, float max_val);
+void tensor_celu_gpu(Tensor* out, const Tensor* in, float alpha);
+void tensor_softsign_gpu(Tensor* out, const Tensor* in);
+void tensor_rrelu_gpu(Tensor* out, const Tensor* in, float lower, float upper);
+void tensor_threshold_gpu(Tensor* out, const Tensor* in, float threshold, float value);
 
 // Half Precision
 HalfTensor* tensor_to_half(const Tensor* t);

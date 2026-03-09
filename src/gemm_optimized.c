@@ -26,31 +26,9 @@
 #define PREFETCH_L1_DIST 64   // 256 bytes ahead for L1
 #define PREFETCH_L2_DIST 256  // 1KB ahead for L2
 
-// Thread-local packing buffers (allocated per-thread)
-static __thread float* Ac_local = NULL;
+// Thread-local packing buffers (allocated per-thread, freed on thread exit)
+static __thread float* Ac_local     = NULL;
 static __thread size_t Ac_local_size = 0;
-
-// Shared B packing buffer
-static float* Bc __attribute__((aligned(64))) = NULL;
-static size_t Bc_size = 0;
-
-// Initialize/resize packing buffers
-static inline void ensure_buffers(size_t ac_size, size_t bc_size) {
-    if (Ac_local == NULL || Ac_local_size < ac_size) {
-        if (Ac_local) rpitorch_aligned_free(Ac_local);
-        Ac_local = (float*)rpitorch_aligned_alloc(64, ac_size);
-        Ac_local_size = ac_size;
-    }
-    
-    #pragma omp critical
-    {
-        if (Bc == NULL || Bc_size < bc_size) {
-            if (Bc) rpitorch_aligned_free(Bc);
-            Bc = (float*)rpitorch_aligned_alloc(64, bc_size);
-            Bc_size = bc_size;
-        }
-    }
-}
 
 // Pack A into MR x K panels (column-major within panel)
 // NEON-optimized for 8-element wide packing
@@ -253,17 +231,19 @@ static inline void __attribute__((hot)) gemm_micro_kernel_8x8(
 #endif
 }
 
-// Cleanup buffers
-void gemm_init_buffers() {
-    // Now handled lazily in ensure_buffers
-}
+// Cleanup buffers — Ac_local is thread-local and freed on thread exit via the destructor
+// registered in parallel_gemm_optimized; Bc is local per-call (see below).
+void gemm_init_buffers() {}   // no-op: buffers are lazily allocated
 
 void gemm_free_buffers() {
-    if (Bc) { rpitorch_aligned_free(Bc); Bc = NULL; Bc_size = 0; }
-    // Thread-local Ac_local freed on thread exit
+    // Thread-local Ac_local freed on thread exit.
+    // Nothing global to free anymore.
 }
 
-// Optimized GEMM with 5-level blocking
+// Optimized GEMM with 5-level blocking.
+// NOT thread-safe to call recursively from inside an OMP parallel region.
+// Callers that want outer parallelism must call parallel_gemm_optimized which
+// manages its own omp parallel internally.
 void gemm_optimized_cortex_a72(
     const float* A,
     const float* B,
@@ -271,67 +251,67 @@ void gemm_optimized_cortex_a72(
     int M, int N, int K,
     int lda, int ldb, int ldc
 ) {
-    // Round up to tile boundaries
-    int M_tiles = (M + MR - 1) / MR;
-    int N_tiles = (N + NR - 1) / NR;
-    
-    // Level 5: Outer N-loop (L2 cache blocking for B)
+    // Allocate Bc locally per call — eliminates the global shared-pointer race.
+    // At most (NC * KC) floats; worst case KC=256, NC=2048 → 512 KB.
+    const int Nc   = (N < NC) ? N : NC;
+    const int Kc   = (K < KC) ? K : KC;
+    const size_t bc_bytes = (size_t)((N + NR - 1) / NR * NR) *
+                            (size_t)((K + KC - 1) / KC * KC) * sizeof(float);
+    float* Bc = (float*)rpitorch_aligned_alloc(64, bc_bytes > 0 ? bc_bytes : 64);
+    (void)Nc; (void)Kc;
+
+    // Level 5: Outer N-loop (L2 blocking for B)
     for (int jc = 0; jc < N; jc += NC) {
         int nc = (jc + NC > N) ? (N - jc) : NC;
-        
-        // Level 4: K-loop (L1 cache blocking)
+
+        // Level 4: K-loop (L1 blocking)
         for (int pc = 0; pc < K; pc += KC) {
             int kc = (pc + KC > K) ? (K - pc) : KC;
-            
-            // Ensure B buffer is large enough
-            size_t bc_needed = (size_t)nc * kc * sizeof(float);
-            #pragma omp single
-            {
-                if (Bc == NULL || Bc_size < bc_needed) {
-                    if (Bc) rpitorch_aligned_free(Bc);
-                    Bc = (float*)rpitorch_aligned_alloc(64, bc_needed);
-                    Bc_size = bc_needed;
-                }
-                // Pack B panel (single-threaded to avoid races)
-                pack_B_8(&B[pc*ldb + jc], Bc, kc, nc, ldb);
+
+            // Pack B panel — single-threaded here; caller parallelises at a higher level.
+            pack_B_8(&B[pc * ldb + jc], Bc, kc, nc, ldb);
+
+            // Ensure thread-local A buffer
+            size_t ac_needed = (size_t)MC * kc * sizeof(float);
+            if (Ac_local == NULL || Ac_local_size < ac_needed) {
+                if (Ac_local) rpitorch_aligned_free(Ac_local);
+                Ac_local = (float*)rpitorch_aligned_alloc(64, ac_needed);
+                Ac_local_size = ac_needed;
             }
-            
-            // Level 3: M-loop (L2 cache blocking, parallelized)
-            #pragma omp parallel
-            {
-                // Ensure thread-local A buffer
-                size_t ac_needed = (size_t)MC * kc * sizeof(float);
-                if (Ac_local == NULL || Ac_local_size < ac_needed) {
+
+            // Level 3: M-loop — parallelised here (safe: Bc is local, Ac is TLS)
+            #pragma omp parallel for schedule(dynamic, 1)
+            for (int ic = 0; ic < M; ic += MC) {
+                int mc = (ic + MC > M) ? (M - ic) : MC;
+
+                // Resize TLS A buffer if this thread needs more space
+                if (Ac_local == NULL || Ac_local_size < (size_t)mc * kc * sizeof(float)) {
                     if (Ac_local) rpitorch_aligned_free(Ac_local);
-                    Ac_local = (float*)rpitorch_aligned_alloc(64, ac_needed);
-                    Ac_local_size = ac_needed;
+                    Ac_local = (float*)rpitorch_aligned_alloc(64, (size_t)mc * kc * sizeof(float));
+                    Ac_local_size = (size_t)mc * kc * sizeof(float);
                 }
-                
-                #pragma omp for schedule(dynamic, 1)
-                for (int ic = 0; ic < M; ic += MC) {
-                    int mc = (ic + MC > M) ? (M - ic) : MC;
-                    
-                    // Pack A panel (thread-local)
-                    pack_A_8(&A[ic*lda + pc], Ac_local, mc, kc, lda);
-                    
-                    // Level 2: Micro-panel N-loop
-                    for (int jr = 0; jr < nc; jr += NR) {
-                        // Level 1: Micro-panel M-loop
-                        for (int ir = 0; ir < mc; ir += MR) {
-                            // 8x8 micro-kernel
-                            gemm_micro_kernel_8x8(
-                                &Ac_local[(ir/MR)*kc*MR],
-                                &Bc[jr*kc],
-                                &C[(ic+ir)*ldc + jc + jr],
-                                ldc,
-                                kc
-                            );
-                        }
+
+                // Pack A panel (thread-local)
+                pack_A_8(&A[ic * lda + pc], Ac_local, mc, kc, lda);
+
+                // Level 2: Micro-panel N-loop
+                for (int jr = 0; jr < nc; jr += NR) {
+                    // Level 1: Micro-panel M-loop
+                    for (int ir = 0; ir < mc; ir += MR) {
+                        gemm_micro_kernel_8x8(
+                            &Ac_local[(ir / MR) * kc * MR],
+                            &Bc[jr * kc],
+                            &C[(ic + ir) * ldc + jc + jr],
+                            ldc,
+                            kc
+                        );
                     }
                 }
             }
         }
     }
+
+    rpitorch_aligned_free(Bc);
 }
 
 // Wrapper for tensor interface

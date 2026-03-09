@@ -331,9 +331,11 @@ class Tensor:
 
     @property
     def device(self):
-        return self._ptr.contents.device
+        return self._ptr[0].device
 
-    # --- Autograd ---
+    def __repr__(self):
+        device_str = "CPU" if self.device == 0 else "GPU"
+        return f"rpl.Tensor({self.data}, device={device_str}, requires_grad={self._ptr[0].requires_grad})"
     def backward(self):
         _lib.tensor_backward(self._ptr)
 

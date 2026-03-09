@@ -118,7 +118,15 @@ static inline float32x4_t fast_log_neon(float32x4_t x) {
 // ============================================================
 
 void tensor_leaky_relu(Tensor* out, const Tensor* in, float negative_slope) {
-    
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_leaky_relu_gpu(out, in, negative_slope);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
     #if RPITORCH_HAS_NEON
     float32x4_t vzero = vdupq_n_f32(0.0f);
     float32x4_t vslope = vdupq_n_f32(negative_slope);
@@ -155,6 +163,15 @@ void tensor_leaky_relu_inplace(Tensor* t, float negative_slope) {
 // ============================================================
 
 void tensor_elu(Tensor* out, const Tensor* in, float alpha) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_elu_gpu(out, in, alpha);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
 #if RPITORCH_HAS_NEON
     float32x4_t valpha = vdupq_n_f32(alpha);
     float32x4_t vzero = vdupq_n_f32(0.0f);
@@ -202,6 +219,15 @@ void tensor_elu_inplace(Tensor* t, float alpha) {
 // ============================================================
 
 void tensor_swish(Tensor* out, const Tensor* in) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_swish_gpu(out, in);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
 #if RPITORCH_HAS_NEON
     #pragma omp parallel for
     for (uint32_t base = 0; base < in->size; base += 256) {
@@ -241,6 +267,15 @@ void tensor_swish_inplace(Tensor* t) {
 // ============================================================
 
 void tensor_softplus(Tensor* out, const Tensor* in, float beta, float threshold) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_softplus_gpu(out, in, beta, threshold);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
 #if RPITORCH_HAS_NEON
     const float32x4_t vbeta = vdupq_n_f32(beta);
     const float32x4_t vthreshold = vdupq_n_f32(threshold);
@@ -289,10 +324,13 @@ void tensor_softplus_inplace(Tensor* t, float beta, float threshold) {
 
 void tensor_gelu(Tensor* out, const Tensor* in) {
 #ifdef USE_GPU
-    if (in->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
         tensor_gelu_gpu(out, in);
         return;
     }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
 #endif
 #if RPITORCH_HAS_NEON
     const float32x4_t HALF = vdupq_n_f32(0.5f);
@@ -330,6 +368,15 @@ void tensor_gelu(Tensor* out, const Tensor* in) {
 // ============================================================
 
 void tensor_selu(Tensor* out, const Tensor* in) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_selu_gpu(out, in);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
     const float SELU_LAMBDA = 1.0507009873554804934f;
     const float SELU_ALPHA  = 1.6732632423543772848f;
 #if RPITORCH_HAS_NEON
@@ -364,6 +411,15 @@ void tensor_selu_inplace(Tensor* t) { tensor_selu(t, t); }
 // ============================================================
 
 void tensor_mish(Tensor* out, const Tensor* in) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_mish_gpu(out, in);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
 #if RPITORCH_HAS_NEON
     const float32x4_t vone = vdupq_n_f32(1.0f);
     uint32_t i = 0;
@@ -403,6 +459,15 @@ void tensor_mish_inplace(Tensor* t) { tensor_mish(t, t); }
 // ============================================================
 
 void tensor_hardswish(Tensor* out, const Tensor* in) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_hardswish_gpu(out, in);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
 #if RPITORCH_HAS_NEON
     const float32x4_t vzero = vdupq_n_f32(0.0f);
     const float32x4_t vthree = vdupq_n_f32(3.0f);
@@ -436,6 +501,15 @@ void tensor_hardswish_inplace(Tensor* t) { tensor_hardswish(t, t); }
 // ============================================================
 
 void tensor_hardsigmoid(Tensor* out, const Tensor* in) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_hardsigmoid_gpu(out, in);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
 #if RPITORCH_HAS_NEON
     const float32x4_t vzero = vdupq_n_f32(0.0f);
     const float32x4_t vone = vdupq_n_f32(1.0f);
@@ -464,6 +538,15 @@ void tensor_hardsigmoid_inplace(Tensor* t) { tensor_hardsigmoid(t, t); }
 // ============================================================
 
 void tensor_hardtanh(Tensor* out, const Tensor* in, float min_val, float max_val) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_hardtanh_gpu(out, in, min_val, max_val);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
 #if RPITORCH_HAS_NEON
     float32x4_t vlo = vdupq_n_f32(min_val);
     float32x4_t vhi = vdupq_n_f32(max_val);
@@ -492,6 +575,15 @@ void tensor_hardtanh_inplace(Tensor* t, float min_val, float max_val) {
 // ============================================================
 
 void tensor_celu(Tensor* out, const Tensor* in, float alpha) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_celu_gpu(out, in, alpha);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
     float inv_alpha = 1.0f / alpha;
 #if RPITORCH_HAS_NEON
     const float32x4_t vzero = vdupq_n_f32(0.0f);
@@ -526,6 +618,15 @@ void tensor_celu_inplace(Tensor* t, float alpha) { tensor_celu(t, t, alpha); }
 // ============================================================
 
 void tensor_softsign(Tensor* out, const Tensor* in) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_softsign_gpu(out, in);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
 #if RPITORCH_HAS_NEON
     const float32x4_t vone = vdupq_n_f32(1.0f);
     uint32_t i = 0;
@@ -557,6 +658,15 @@ void tensor_softsign_inplace(Tensor* t) { tensor_softsign(t, t); }
 // ============================================================
 
 void tensor_log_softmax(Tensor* out, const Tensor* in) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_log_softmax_gpu(out, in);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
     uint32_t batch = 1;
     uint32_t dim_size = in->shape[in->dims - 1];
     for (uint32_t d = 0; d < in->dims - 1; d++) batch *= in->shape[d];
@@ -632,6 +742,15 @@ void tensor_prelu(Tensor* out, const Tensor* in, const Tensor* weight) {
 // ============================================================
 
 void tensor_rrelu(Tensor* out, const Tensor* in, float lower, float upper) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_rrelu_gpu(out, in, lower, upper);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
     float slope = (lower + upper) * 0.5f;
 #if RPITORCH_HAS_NEON
     const float32x4_t vzero = vdupq_n_f32(0.0f);
@@ -665,6 +784,15 @@ void tensor_rrelu_inplace(Tensor* t, float lower, float upper) {
 // ============================================================
 
 void tensor_threshold(Tensor* out, const Tensor* in, float threshold, float value) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size)) {
+        tensor_threshold_gpu(out, in, threshold, value);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
 #if RPITORCH_HAS_NEON
     float32x4_t vthresh = vdupq_n_f32(threshold);
     float32x4_t vval = vdupq_n_f32(value);

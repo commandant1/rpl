@@ -15,6 +15,10 @@ static inline Tensor* _like(const Tensor* t) {
 #define DEFINE_UNARY_OP(name, expr) \
 Tensor* tensor_##name(const Tensor* t) { \
     Tensor* out = _like(t); \
+_Pragma("GCC diagnostic push") \
+_Pragma("GCC diagnostic ignored \"-Wunused-value\"") \
+    (void)0; \
+_Pragma("GCC diagnostic pop") \
     _Pragma("omp parallel for if(t->size >= RPL_OMP_THRESHOLD)") \
     for (uint32_t i = 0; i < t->size; i++) { \
         float x = t->data[i]; \
@@ -30,6 +34,51 @@ void tensor_##name##_inplace(Tensor* t) { \
     } \
 }
 
+/* GPU-aware wrapper: if either operand is on GPU AND tensor is large enough,
+ * route to the GPU compute shader.  For small tensors, GLES kernel launch
+ * overhead (~100-500 µs on VideoCore VI) exceeds the NEON cost, so we fall
+ * through to the CPU path (pulling data back from GPU if needed). */
+#ifdef USE_GPU
+#define DEFINE_UNARY_OP_GPU(name, expr) \
+Tensor* tensor_##name(const Tensor* t) { \
+    Tensor* out = _like(t); \
+    if ((t->device == DEVICE_GPU || out->device == DEVICE_GPU) \
+            && RPL_GPU_PREFERABLE(t->size)) { \
+        tensor_##name##_gpu(out, t); \
+        return out; \
+    } \
+    if (t->device == DEVICE_GPU) tensor_from_gpu((Tensor*)t); \
+    _Pragma("omp parallel for if(t->size >= RPL_OMP_THRESHOLD)") \
+    for (uint32_t i = 0; i < t->size; i++) { float x = t->data[i]; out->data[i] = (expr); } \
+    return out; \
+} \
+void tensor_##name##_inplace(Tensor* t) { \
+    if (t->device == DEVICE_GPU && RPL_GPU_PREFERABLE(t->size)) { \
+        tensor_##name##_gpu(t, t); return; \
+    } \
+    if (t->device == DEVICE_GPU) tensor_from_gpu(t); \
+    _Pragma("omp parallel for if(t->size >= RPL_OMP_THRESHOLD)") \
+    for (uint32_t i = 0; i < t->size; i++) { float x = t->data[i]; t->data[i] = (expr); } \
+}
+#define DEFINE_BINARY_OP_GPU(name, expr) \
+Tensor* tensor_##name(const Tensor* a, const Tensor* b) { \
+    Tensor* out = _like(a); \
+    if ((a->device == DEVICE_GPU || b->device == DEVICE_GPU) \
+            && RPL_GPU_PREFERABLE(a->size)) { \
+        tensor_##name##_gpu(out, a, b); \
+        return out; \
+    } \
+    if (a->device == DEVICE_GPU) tensor_from_gpu((Tensor*)a); \
+    if (b->device == DEVICE_GPU) tensor_from_gpu((Tensor*)b); \
+    _Pragma("omp parallel for if(a->size >= RPL_OMP_THRESHOLD)") \
+    for (uint32_t i = 0; i < a->size; i++) { float x = a->data[i]; float y = b->data[i % b->size]; out->data[i] = (expr); } \
+    return out; \
+}
+#else
+#define DEFINE_UNARY_OP_GPU(name, expr)  DEFINE_UNARY_OP(name, expr)
+#define DEFINE_BINARY_OP_GPU(name, expr) DEFINE_BINARY_OP(name, expr)
+#endif
+
 #define DEFINE_BINARY_OP(name, expr) \
 Tensor* tensor_##name(const Tensor* a, const Tensor* b) { \
     Tensor* out = _like(a); \
@@ -42,54 +91,92 @@ Tensor* tensor_##name(const Tensor* a, const Tensor* b) { \
     return out; \
 }
 
-// --- Forward declare helpers ---
+// Rounding — use manual GPU dispatch (GPU funcs don't have _op suffix)
+#ifdef USE_GPU
+#define DEFINE_ROUND_GPU(name, gpuname, expr) \
+Tensor* tensor_##name(const Tensor* t) { \
+    Tensor* out = _like(t); \
+    if ((t->device == DEVICE_GPU || out->device == DEVICE_GPU) \
+            && RPL_GPU_PREFERABLE(t->size)) { \
+        tensor_##gpuname##_gpu(out, t); return out; \
+    } \
+    if (t->device == DEVICE_GPU) tensor_from_gpu((Tensor*)t); \
+    _Pragma("omp parallel for if(t->size >= RPL_OMP_THRESHOLD)") \
+    for (uint32_t i = 0; i < t->size; i++) { float x = t->data[i]; out->data[i] = (expr); } \
+    return out; \
+} \
+void tensor_##name##_inplace(Tensor* t) { \
+    if (t->device == DEVICE_GPU && RPL_GPU_PREFERABLE(t->size)) { \
+        tensor_##gpuname##_gpu(t, t); return; \
+    } \
+    if (t->device == DEVICE_GPU) tensor_from_gpu(t); \
+    _Pragma("omp parallel for if(t->size >= RPL_OMP_THRESHOLD)") \
+    for (uint32_t i = 0; i < t->size; i++) { float x = t->data[i]; t->data[i] = (expr); } \
+}
+#else
+#define DEFINE_ROUND_GPU(name, gpuname, expr) DEFINE_UNARY_OP(name, expr)
+#endif
+
 static float erfinvf_approx(float x);
 static float digamma_impl(float x);
 static float i0f_approx(float x);
 
 // Trig
-DEFINE_UNARY_OP(sin, sinf(x))
-DEFINE_UNARY_OP(cos, cosf(x))
-DEFINE_UNARY_OP(tan, tanf(x))
-DEFINE_UNARY_OP(asin, asinf(x))
-DEFINE_UNARY_OP(acos, acosf(x))
-DEFINE_UNARY_OP(atan, atanf(x))
-DEFINE_BINARY_OP(atan2, atan2f(x, y))
-DEFINE_BINARY_OP(hypot, hypotf(x, y))
+DEFINE_UNARY_OP_GPU(sin, sinf(x))
+DEFINE_UNARY_OP_GPU(cos, cosf(x))
+DEFINE_UNARY_OP_GPU(tan, tanf(x))
+DEFINE_UNARY_OP_GPU(asin, asinf(x))
+DEFINE_UNARY_OP_GPU(acos, acosf(x))
+DEFINE_UNARY_OP_GPU(atan, atanf(x))
+DEFINE_BINARY_OP_GPU(atan2, atan2f(x, y))
+DEFINE_BINARY_OP_GPU(hypot, hypotf(x, y))
 
 // Hyperbolic
-DEFINE_UNARY_OP(sinh, sinhf(x))
-DEFINE_UNARY_OP(cosh, coshf(x))
-DEFINE_UNARY_OP(asinh, asinhf(x))
-DEFINE_UNARY_OP(acosh, acoshf(x))
-DEFINE_UNARY_OP(atanh, atanhf(x))
+DEFINE_UNARY_OP_GPU(sinh, sinhf(x))
+DEFINE_UNARY_OP_GPU(cosh, coshf(x))
+DEFINE_UNARY_OP_GPU(asinh, asinhf(x))
+DEFINE_UNARY_OP_GPU(acosh, acoshf(x))
+DEFINE_UNARY_OP_GPU(atanh, atanhf(x))
 
 // Exp/Log
-DEFINE_UNARY_OP(exp, expf(x))
-DEFINE_UNARY_OP(expm1, expm1f(x))
-DEFINE_UNARY_OP(exp2, exp2f(x))
-DEFINE_UNARY_OP(log, logf(x))
-DEFINE_UNARY_OP(log2, log2f(x))
-DEFINE_UNARY_OP(log10, log10f(x))
-DEFINE_UNARY_OP(log1p, log1pf(x))
-DEFINE_BINARY_OP(logaddexp, logf(expf(x) + expf(y)))
-DEFINE_BINARY_OP(logaddexp2, log2f(exp2f(x) + exp2f(y)))
+DEFINE_UNARY_OP_GPU(exp, expf(x))
+DEFINE_UNARY_OP_GPU(expm1, expm1f(x))
+DEFINE_UNARY_OP_GPU(exp2, exp2f(x))
+DEFINE_UNARY_OP_GPU(log, logf(x))
+DEFINE_UNARY_OP_GPU(log2, log2f(x))
+DEFINE_UNARY_OP_GPU(log10, log10f(x))
+DEFINE_UNARY_OP_GPU(log1p, log1pf(x))
+DEFINE_BINARY_OP_GPU(logaddexp, logf(expf(x) + expf(y)))
+DEFINE_BINARY_OP_GPU(logaddexp2, log2f(exp2f(x) + exp2f(y)))
 
 // Rounding
-DEFINE_UNARY_OP(round_op, roundf(x))
-DEFINE_UNARY_OP(floor_op, floorf(x))
-DEFINE_UNARY_OP(ceil_op, ceilf(x))
-DEFINE_UNARY_OP(trunc_op, truncf(x))
-DEFINE_UNARY_OP(frac, x - truncf(x))
+DEFINE_ROUND_GPU(round_op, round, roundf(x))
+DEFINE_ROUND_GPU(floor_op, floor, floorf(x))
+DEFINE_ROUND_GPU(ceil_op,  ceil,  ceilf(x))
+DEFINE_ROUND_GPU(trunc_op, trunc, truncf(x))
+DEFINE_ROUND_GPU(frac,     frac,  x - truncf(x))
 
-// Power & Root
-DEFINE_BINARY_OP(pow_op, powf(x, y))
-DEFINE_UNARY_OP(sqrt_op, sqrtf(x))
-DEFINE_UNARY_OP(cbrt, cbrtf(x))
+// Power & Root — sqrt_op, pow_op also have _op suffix
+#ifdef USE_GPU
+#define DEFINE_POW_GPU(name, gpuname, expr) DEFINE_ROUND_GPU(name, gpuname, expr)
+#else
+#define DEFINE_POW_GPU(name, gpuname, expr) DEFINE_UNARY_OP(name, expr)
+#endif
+
+DEFINE_ROUND_GPU(sqrt_op, sqrt, sqrtf(x))
+DEFINE_UNARY_OP_GPU(cbrt, cbrtf(x))
+
+
 
 // rsqrt — NEON estimate + 1 Newton step for full precision
 Tensor* tensor_rsqrt(const Tensor* t) {
     Tensor* out = _like(t);
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        tensor_rsqrt_gpu(out, t);
+        return out;
+    }
+#endif
 #if RPITORCH_HAS_NEON
     uint32_t i = 0;
     for (; i + 16 <= t->size; i += 16) {
@@ -125,6 +212,12 @@ void tensor_rsqrt_inplace(Tensor* t) {
 // square — NEON vmulq_f32(v, v)
 Tensor* tensor_square(const Tensor* t) {
     Tensor* out = _like(t);
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        tensor_square_gpu(out, t);
+        return out;
+    }
+#endif
 #if RPITORCH_HAS_NEON
     uint32_t i = 0;
     for (; i + 16 <= t->size; i += 16) {
@@ -156,6 +249,12 @@ void tensor_square_inplace(Tensor* t) {
 // reciprocal — NEON estimate + 1 Newton step
 Tensor* tensor_reciprocal(const Tensor* t) {
     Tensor* out = _like(t);
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        tensor_reciprocal_gpu(out, t);
+        return out;
+    }
+#endif
 #if RPITORCH_HAS_NEON
     uint32_t i = 0;
     for (; i + 16 <= t->size; i += 16) {
@@ -191,6 +290,12 @@ void tensor_reciprocal_inplace(Tensor* t) {
 // abs — NEON vabsq_f32
 Tensor* tensor_abs_op(const Tensor* t) {
     Tensor* out = _like(t);
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        tensor_abs_gpu(out, t);
+        return out;
+    }
+#endif
 #if RPITORCH_HAS_NEON
     uint32_t i = 0;
     for (; i + 16 <= t->size; i += 16) {
@@ -220,6 +325,12 @@ void tensor_abs_op_inplace(Tensor* t) {
 // neg — NEON vnegq_f32
 Tensor* tensor_neg(const Tensor* t) {
     Tensor* out = _like(t);
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        tensor_neg_gpu(out, t);
+        return out;
+    }
+#endif
 #if RPITORCH_HAS_NEON
     uint32_t i = 0;
     for (; i + 16 <= t->size; i += 16) {
@@ -246,30 +357,51 @@ void tensor_neg_inplace(Tensor* t) {
 #endif
 }
 
-DEFINE_UNARY_OP(sign, (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f))
+DEFINE_UNARY_OP_GPU(sign, (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f))
 DEFINE_UNARY_OP(signbit_op, (x < 0.0f) ? 1.0f : 0.0f)
 DEFINE_BINARY_OP(copysign_op, copysignf(x, y))
 DEFINE_BINARY_OP(heaviside, (x < 0.0f) ? 0.0f : ((x > 0.0f) ? 1.0f : y))
 
 // Angular
-DEFINE_UNARY_OP(deg2rad, x * (float)(M_PI / 180.0))
-DEFINE_UNARY_OP(rad2deg, x * (float)(180.0 / M_PI))
+DEFINE_UNARY_OP_GPU(deg2rad, x * (float)(M_PI / 180.0))
+DEFINE_UNARY_OP_GPU(rad2deg, x * (float)(180.0 / M_PI))
 
 // Special
-DEFINE_UNARY_OP(erf, erff(x))
+DEFINE_UNARY_OP_GPU(erf, erff(x))
 DEFINE_UNARY_OP(erfc, erfcf(x))
 DEFINE_UNARY_OP(erfinv, erfinvf_approx(x))
 DEFINE_UNARY_OP(lgamma_op, lgammaf(x))
 DEFINE_UNARY_OP(digamma, digamma_impl(x))
 DEFINE_UNARY_OP(sinc, (fabsf(x) < 1e-7f) ? 1.0f : sinf((float)M_PI * x) / ((float)M_PI * x))
 DEFINE_UNARY_OP(i0, i0f_approx(x))
-DEFINE_UNARY_OP(logit, logf(x / (1.0f - x)))
+DEFINE_UNARY_OP_GPU(logit, logf(x / (1.0f - x)))
 
-// Binary math
-DEFINE_BINARY_OP(fmod_op, fmodf(x, y))
-DEFINE_BINARY_OP(remainder_op, remainderf(x, y))
-DEFINE_BINARY_OP(floor_divide, floorf(x / y))
+// Binary math — fmod_op and remainder_op have _op suffix
+/* Helper macro for binary ops where the GPU func name differs */
+#ifdef USE_GPU
+#define DEFINE_BINARY_RENAMED_GPU(name, gpuname, expr) \
+Tensor* tensor_##name(const Tensor* a, const Tensor* b) { \
+    Tensor* out = _like(a); \
+    if ((a->device == DEVICE_GPU || b->device == DEVICE_GPU) \
+            && RPL_GPU_PREFERABLE(a->size)) { \
+        tensor_##gpuname##_gpu(out, a, b); return out; \
+    } \
+    if (a->device == DEVICE_GPU) tensor_from_gpu((Tensor*)a); \
+    if (b->device == DEVICE_GPU) tensor_from_gpu((Tensor*)b); \
+    _Pragma("omp parallel for if(a->size >= RPL_OMP_THRESHOLD)") \
+    for (uint32_t i = 0; i < a->size; i++) { float x = a->data[i]; float y = b->data[i % b->size]; out->data[i] = (expr); } \
+    return out; \
+}
+#else
+#define DEFINE_BINARY_RENAMED_GPU(name, gpuname, expr) DEFINE_BINARY_OP(name, expr)
+#endif
+
+DEFINE_BINARY_RENAMED_GPU(pow_op, pow, powf(x, y))
+DEFINE_BINARY_RENAMED_GPU(fmod_op, fmod, fmodf(x, y))
+DEFINE_BINARY_RENAMED_GPU(remainder_op, remainder, remainderf(x, y))
+DEFINE_BINARY_OP_GPU(floor_divide, floorf(x / y))
 DEFINE_BINARY_OP(true_divide, x / y)
+
 
 // --- Helper implementations ---
 
@@ -307,6 +439,12 @@ static float i0f_approx(float x) {
 // Clamp (NEON)
 Tensor* tensor_clamp(const Tensor* t, float lo, float hi) {
     Tensor* out = _like(t);
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU || out->device == DEVICE_GPU) {
+        tensor_clamp_gpu(out, t, lo, hi);
+        return out;
+    }
+#endif
 #if RPITORCH_HAS_NEON
     float32x4_t vlo = vdupq_n_f32(lo), vhi = vdupq_n_f32(hi);
     uint32_t i = 0;
@@ -362,14 +500,18 @@ Tensor* tensor_lerp(const Tensor* a, const Tensor* b, float w) {
 Tensor* tensor_sub(const Tensor* a, const Tensor* b) {
     Tensor* out = _like(a);
 #ifdef USE_GPU
-    if (a->device == DEVICE_GPU || b->device == DEVICE_GPU) {
+    if ((a->device == DEVICE_GPU || b->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(a->size)) {
         if (a->size == b->size) {
             tensor_sub_gpu(out, a, b);
-            return;
+            return out;
         } else {
             tensor_from_gpu((Tensor*)a);
             tensor_from_gpu((Tensor*)b);
         }
+    } else {
+        if (a->device == DEVICE_GPU) tensor_from_gpu((Tensor*)a);
+        if (b->device == DEVICE_GPU) tensor_from_gpu((Tensor*)b);
     }
 #endif
 #if RPITORCH_HAS_NEON
@@ -394,14 +536,18 @@ Tensor* tensor_sub(const Tensor* a, const Tensor* b) {
 Tensor* tensor_div(const Tensor* a, const Tensor* b) {
     Tensor* out = _like(a);
 #ifdef USE_GPU
-    if (a->device == DEVICE_GPU || b->device == DEVICE_GPU) {
+    if ((a->device == DEVICE_GPU || b->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(a->size)) {
         if (a->size == b->size) {
             tensor_div_gpu(out, a, b);
-            return;
+            return out;
         } else {
             tensor_from_gpu((Tensor*)a);
             tensor_from_gpu((Tensor*)b);
         }
+    } else {
+        if (a->device == DEVICE_GPU) tensor_from_gpu((Tensor*)a);
+        if (b->device == DEVICE_GPU) tensor_from_gpu((Tensor*)b);
     }
 #endif
     #pragma omp parallel for

@@ -74,8 +74,11 @@ target_link_libraries(test_new_api PRIVATE rpl m)
 if (USE_GPU)
     add_executable(rpl_gpu_test examples/gpu_test.c)
     target_link_libraries(rpl_gpu_test PRIVATE rpl ${LIBS})
-    
-    install(TARGETS rpl rpl_static rpl_gpu_test rpl_train_xor
+
+    add_executable(rpl_gpu_ops_test tests/rpl_gpu_ops_test.c)
+    target_link_libraries(rpl_gpu_ops_test PRIVATE rpl m ${LIBS})
+
+    install(TARGETS rpl rpl_static rpl_gpu_test rpl_gpu_ops_test rpl_train_xor
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib
         RUNTIME DESTINATION bin)

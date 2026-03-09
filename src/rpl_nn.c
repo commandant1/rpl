@@ -145,6 +145,36 @@ Tensor* conv2d_forward(Conv2dLayer* layer, const Tensor* input) {
     uint32_t output_shape[4] = {batch, layer->out_channels, out_h, out_w};
     Tensor* output = tensor_create(4, output_shape, input->requires_grad);
     
+    // ----------------------------------------------------------------
+    // GPU dispatch: prefer GPU when input is on device and the workload
+    // is large enough to absorb kernel-launch overhead.
+    // FLOPs ≈ 2 * batch * C_out * out_h * out_w * C_in * ks * ks
+    // ----------------------------------------------------------------
+#ifdef USE_GPU
+    {
+        uint64_t conv_flops = (uint64_t)batch * layer->out_channels *
+                              out_h * out_w *
+                              layer->in_channels * ks * ks;
+        if (input->device == DEVICE_GPU && conv_flops >= RPL_GPU_GEMM_FLOP_THRESHOLD) {
+            tensor_conv2d_gpu(output, input, layer->weight,
+                              (int)ks, (int)ks,
+                              (int)layer->stride, (int)layer->padding);
+            // Bias addition (CPU after readback, or skip if output stays on GPU)
+            // For now pull back and apply; a future kernel could fuse this.
+            tensor_from_gpu(output);
+            for (uint32_t b = 0; b < batch; b++) {
+                float* out_b = &output->data[b * layer->out_channels * out_h * out_w];
+                for (uint32_t oc = 0; oc < layer->out_channels; oc++) {
+                    float  bv  = layer->bias->data[oc];
+                    float* dst = &out_b[oc * out_h * out_w];
+                    for (uint32_t i = 0; i < out_h * out_w; i++) dst[i] += bv;
+                }
+            }
+            return output;
+        }
+    }
+#endif
+
     // Use Winograd for 3x3, stride=1, padding=1 (optimal case)
     if (ks == 3 && layer->stride == 1 && layer->padding == 1) {
         #pragma omp parallel for
@@ -169,71 +199,61 @@ Tensor* conv2d_forward(Conv2dLayer* layer, const Tensor* input) {
     }
     
     // General case: im2col + GEMM
-    // im2col buffer: [in_channels * ks * ks, out_h * out_w]
-    uint32_t col_size = layer->in_channels * ks * ks * out_h * out_w;
-    
-    #pragma omp parallel
-    {
-        float* col_buf = (float*)rpitorch_aligned_alloc(64, col_size * sizeof(float));
-        
-        #pragma omp for
-        for (uint32_t b = 0; b < batch; b++) {
-            const float* in_b = &input->data[b * layer->in_channels * in_h * in_w];
-            float* out_b = &output->data[b * layer->out_channels * out_h * out_w];
-            
-            // im2col: flatten input patches into columns
-            for (uint32_t oy = 0; oy < out_h; oy++) {
-                for (uint32_t ox = 0; ox < out_w; ox++) {
-                    for (uint32_t ic = 0; ic < layer->in_channels; ic++) {
-                        for (uint32_t ky = 0; ky < ks; ky++) {
-                            for (uint32_t kx = 0; kx < ks; kx++) {
-                                int32_t iy = oy * layer->stride + ky - layer->padding;
-                                int32_t ix = ox * layer->stride + kx - layer->padding;
-                                
-                                uint32_t row = ic * ks * ks + ky * ks + kx;
-                                uint32_t col = oy * out_w + ox;
-                                
-                                if (iy >= 0 && iy < (int32_t)in_h && ix >= 0 && ix < (int32_t)in_w) {
-                                    col_buf[row * out_h * out_w + col] = in_b[ic * in_h * in_w + iy * in_w + ix];
-                                } else {
-                                    col_buf[row * out_h * out_w + col] = 0.0f;
-                                }
-                            }
+    // col_buf layout: [in_channels * ks * ks, out_h * out_w]  (row-major)
+    // Allocate once for all batches — avoids per-thread leaks and nested OMP.
+    uint32_t K_gemm = layer->in_channels * ks * ks;
+    uint32_t N_gemm = out_h * out_w;
+    float* col_buf = (float*)rpitorch_aligned_alloc(64, (size_t)K_gemm * N_gemm * sizeof(float));
+
+    for (uint32_t b = 0; b < batch; b++) {
+        const float* in_b  = &input->data[b * layer->in_channels * in_h * in_w];
+        float*       out_b = &output->data[b * layer->out_channels * out_h * out_w];
+
+        // im2col: fill col_buf[K_gemm × N_gemm]
+        #pragma omp parallel for collapse(3) schedule(static)
+        for (uint32_t ic = 0; ic < layer->in_channels; ic++) {
+            for (uint32_t ky = 0; ky < ks; ky++) {
+                for (uint32_t kx = 0; kx < ks; kx++) {
+                    uint32_t row = ic * ks * ks + ky * ks + kx;
+                    for (uint32_t oy = 0; oy < out_h; oy++) {
+                        for (uint32_t ox = 0; ox < out_w; ox++) {
+                            uint32_t col = oy * out_w + ox;
+                            int32_t iy = (int32_t)(oy * layer->stride + ky) - (int32_t)layer->padding;
+                            int32_t ix = (int32_t)(ox * layer->stride + kx) - (int32_t)layer->padding;
+                            col_buf[row * N_gemm + col] =
+                                (iy >= 0 && iy < (int32_t)in_h &&
+                                 ix >= 0 && ix < (int32_t)in_w)
+                                ? in_b[ic * in_h * in_w + iy * in_w + ix]
+                                : 0.0f;
                         }
                     }
                 }
             }
-            
-            // GEMM: weight[out_ch, in_ch*ks*ks] @ col_buf[in_ch*ks*ks, out_h*out_w]
-            uint32_t M = layer->out_channels;
-            uint32_t K_gemm = layer->in_channels * ks * ks;
-            uint32_t N_gemm = out_h * out_w;
-            
-            memset(out_b, 0, M * N_gemm * sizeof(float));
-            parallel_gemm_optimized(layer->weight->data, col_buf, out_b, M, N_gemm, K_gemm);
-            
-            // Add bias
-            for (uint32_t oc = 0; oc < layer->out_channels; oc++) {
-                float bias_val = layer->bias->data[oc];
-#if RPITORCH_HAS_NEON
-                float32x4_t vbias = vdupq_n_f32(bias_val);
-                uint32_t i = 0;
-                for (; i + 4 <= out_h * out_w; i += 4) {
-                    float32x4_t v = vld1q_f32(&out_b[oc * out_h * out_w + i]);
-                    vst1q_f32(&out_b[oc * out_h * out_w + i], vaddq_f32(v, vbias));
-                }
-                for (; i < out_h * out_w; i++) out_b[oc * out_h * out_w + i] += bias_val;
-#else
-                for (uint32_t i = 0; i < out_h * out_w; i++) {
-                    out_b[oc * out_h * out_w + i] += bias_val;
-                }
-#endif
-            }
         }
-        
-        rpitorch_aligned_free(col_buf);
+
+        // GEMM: weight[out_ch × K_gemm] @ col_buf[K_gemm × N_gemm] → out_b
+        // parallel_gemm_optimized owns its OMP threading internally.
+        memset(out_b, 0, (size_t)layer->out_channels * N_gemm * sizeof(float));
+        parallel_gemm_optimized(layer->weight->data, col_buf, out_b,
+                                layer->out_channels, N_gemm, K_gemm);
+
+        // Bias add (NEON-vectorised)
+        for (uint32_t oc = 0; oc < layer->out_channels; oc++) {
+            float  bias_val = layer->bias->data[oc];
+            float* dst      = &out_b[oc * N_gemm];
+#if RPITORCH_HAS_NEON
+            float32x4_t vbias = vdupq_n_f32(bias_val);
+            uint32_t i = 0;
+            for (; i + 4 <= N_gemm; i += 4)
+                vst1q_f32(&dst[i], vaddq_f32(vld1q_f32(&dst[i]), vbias));
+            for (; i < N_gemm; i++) dst[i] += bias_val;
+#else
+            for (uint32_t i = 0; i < N_gemm; i++) dst[i] += bias_val;
+#endif
+        }
     }
-    
+
+    rpitorch_aligned_free(col_buf);
     return output;
 }
 

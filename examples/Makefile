@@ -2,7 +2,7 @@
 
 CC = gcc
 CFLAGS = -O3 -march=native -fopenmp -I../include
-LDFLAGS = -L../build -lrpl -lm -fopenmp
+LDFLAGS = -L../build -lrpl -lm -fopenmp -Wl,-rpath,$(abspath ../build)
 
 # Targets
 all: c_api_demo simple_nn train_xor
