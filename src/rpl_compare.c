@@ -20,6 +20,14 @@ static inline void _cmp_neon_eq(float* out, const float* a, const float* b, uint
         vst1q_f32(&out[i], vreinterpretq_f32_u32(vandq_u32(vceqq_f32(vld1q_f32(&a[i]), vld1q_f32(&b[i])), vone)));
     for (; i < n; i++) out[i] = (a[i] == b[i]) ? 1.0f : 0.0f;
 }
+/* added NEON not-equal helper */
+static inline void _cmp_neon_ne(float* out, const float* a, const float* b, uint32_t n) {
+    uint32x4_t vone = vreinterpretq_u32_f32(vdupq_n_f32(1.0f));
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        vst1q_f32(&out[i], vreinterpretq_f32_u32(vandq_u32(vmvnq_u32(vceqq_f32(vld1q_f32(&a[i]), vld1q_f32(&b[i]))), vone)));
+    for (; i < n; i++) out[i] = (a[i] != b[i]) ? 1.0f : 0.0f;
+}
 static inline void _cmp_neon_lt(float* out, const float* a, const float* b, uint32_t n) {
     uint32x4_t vone = vreinterpretq_u32_f32(vdupq_n_f32(1.0f));
     uint32_t i = 0;
@@ -70,7 +78,7 @@ Tensor* tensor_##name(const Tensor* a, const Tensor* b) { \
 #endif
 
 DEF_CMP_NEON(eq, _cmp_neon_eq, ==)
-DEF_CMP_NEON(ne, _cmp_neon_eq, !=)  // ne uses scalar fallback, same structure
+DEF_CMP_NEON(ne, _cmp_neon_ne, !=)  // use dedicated NEON 'not-equal' helper
 DEF_CMP_NEON(lt, _cmp_neon_lt, <)
 DEF_CMP_NEON(le, _cmp_neon_le, <=)
 DEF_CMP_NEON(gt, _cmp_neon_gt, >)
