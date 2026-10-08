@@ -124,6 +124,12 @@ class Linear(Module):
     def forward(self, x):
         if not isinstance(x, Tensor):
             x = Tensor(x)
+        if len(x.shape) > 2:
+            orig_shape = list(x.shape)
+            x_flat = x.reshape(-1, orig_shape[-1])
+            out_ptr = _lib.linear_forward(self._ptr, x_flat._ptr)
+            out_t = Tensor(_ptr=out_ptr)
+            return out_t.reshape(*(orig_shape[:-1] + [self.out_features]))
         out_ptr = _lib.linear_forward(self._ptr, x._ptr)
         return Tensor(_ptr=out_ptr)
 

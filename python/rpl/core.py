@@ -262,6 +262,7 @@ _sig("tensor_sort_op", [_PTR, _I32, _BOOL, ctypes.POINTER(_PTR)], _PTR)
 _sig("tensor_equal", [_PTR, _PTR], _BOOL)
 _sig("tensor_allclose", [_PTR, _PTR, _F, _F], _BOOL)
 _sig("tensor_unique", [_PTR, ctypes.POINTER(_U32)], _PTR)
+_sig("tensor_quantize_int8", [_PTR, _F, _I32], ctypes.c_void_p)
 
 # GPU prototypes
 try:
@@ -368,6 +369,10 @@ class Tensor:
     def __repr__(self):
         device_str = "CPU" if self.device == 0 else "GPU"
         return f"rpl.Tensor({self.data}, device={device_str}, requires_grad={self._ptr[0].requires_grad})"
+
+    def item(self):
+        return float(self.data.item()) if self.data.size == 1 else float(self.data.flat[0])
+
     def backward(self):
         _lib.tensor_backward(self._ptr)
 
@@ -513,6 +518,9 @@ class Tensor:
         _lib.tensor_swish(out, self._ptr)
         return Tensor(_ptr=out)
 
+    def silu(self):
+        return self.swish()
+
     def mish(self):
         out = self._make_like()
         _lib.tensor_mish(out, self._ptr)
@@ -567,6 +575,9 @@ class Tensor:
         out = self._make_like()
         _lib.tensor_threshold(out, self._ptr, threshold, value)
         return Tensor(_ptr=out)
+
+    def quantize_int8(self, scale, zero_point=0):
+        return _lib.tensor_quantize_int8(self._ptr, float(scale), int(zero_point))
 
     # --- Math ops (return new tensor) ---
     def abs(self):
