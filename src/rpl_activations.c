@@ -16,17 +16,21 @@
 
 // Pre-computed constants for fast exp (hoisted to avoid reload)
 static const float EXP_LOG2E = 1.442695040f;
-static const float EXP_C1 = 0.240226507f;
-static const float EXP_C2 = 0.452920674f;
-static const float EXP_C3 = 0.713483036f;
+// 4th-order minimax coefficients for 2^f on [0,1)
+// Max relative error: ~0.05% (down from ~0.3% with 3 terms)
+static const float EXP_C1 = 0.0136779459f;
+static const float EXP_C2 = 0.0517869298f;
+static const float EXP_C3 = 0.2413797378f;
+static const float EXP_C4 = 0.6930230856f;
 
-// Ultra-fast exp approximation using bit manipulation + polynomial
-// ~0.3% max relative error, optimal for sigmoid/tanh
+// Fast exp approximation using bit manipulation + 4th-order polynomial
+// ~0.05% max relative error, sufficient for all activations including CELU
 static inline float32x4_t fast_exp_neon(float32x4_t x) {
     const float32x4_t LOG2E = vdupq_n_f32(EXP_LOG2E);
     const float32x4_t C1 = vdupq_n_f32(EXP_C1);
     const float32x4_t C2 = vdupq_n_f32(EXP_C2);
     const float32x4_t C3 = vdupq_n_f32(EXP_C3);
+    const float32x4_t C4 = vdupq_n_f32(EXP_C4);
     const float32x4_t ONE = vdupq_n_f32(1.0f);
     
     // Clamp and compute t = x * log2(e)
@@ -37,9 +41,10 @@ static inline float32x4_t fast_exp_neon(float32x4_t x) {
     float32x4_t k = vrndmq_f32(t);
     float32x4_t f = vsubq_f32(t, k);
     
-    // Horner's method: 2^f ≈ 1 + f*(C3 + f*(C2 + f*C1))
+    // Horner's method: 2^f ≈ 1 + f*(C4 + f*(C3 + f*(C2 + f*C1)))
     float32x4_t exp_f = vfmaq_f32(C2, f, C1);
     exp_f = vfmaq_f32(C3, f, exp_f);
+    exp_f = vfmaq_f32(C4, f, exp_f);
     exp_f = vfmaq_f32(ONE, f, exp_f);
     
     // 2^k via IEEE754 bit manipulation (zero cost)
@@ -812,4 +817,79 @@ void tensor_threshold(Tensor* out, const Tensor* in, float threshold, float valu
 
 void tensor_threshold_inplace(Tensor* t, float threshold, float value) {
     tensor_threshold(t, t, threshold, value);
+}
+
+// ============================================================
+// SwiGLU: Swish(x[..., :d/2]) * x[..., d/2:]
+// ============================================================
+void tensor_swiglu(Tensor* out, const Tensor* in, int32_t dim) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size / 2)) {
+        tensor_swiglu_gpu(out, in, dim);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
+    if (dim < 0) dim += in->dims;
+    uint32_t stride = 1;
+    for (uint32_t i = dim + 1; i < in->dims; i++) stride *= in->shape[i];
+    uint32_t half_dim = in->shape[dim] / 2;
+    uint32_t pre_dim = 1;
+    for (uint32_t i = 0; i < dim; i++) pre_dim *= in->shape[i];
+
+    #pragma omp parallel for collapse(2)
+    for (uint32_t p = 0; p < pre_dim; p++) {
+        for (uint32_t h = 0; h < half_dim; h++) {
+            for (uint32_t s = 0; s < stride; s++) {
+                uint32_t in_idx1 = p * (half_dim * 2) * stride + h * stride + s;
+                uint32_t in_idx2 = p * (half_dim * 2) * stride + (h + half_dim) * stride + s;
+                uint32_t out_idx = p * half_dim * stride + h * stride + s;
+                
+                float x = in->data[in_idx1];
+                float gate = in->data[in_idx2];
+                float sigmoid = 1.0f / (1.0f + expf(-x));
+                out->data[out_idx] = x * sigmoid * gate;
+            }
+        }
+    }
+}
+
+// ============================================================
+// GeGLU: GELU(x[..., :d/2]) * x[..., d/2:]
+// ============================================================
+void tensor_geglu(Tensor* out, const Tensor* in, int32_t dim) {
+#ifdef USE_GPU
+    if ((in->device == DEVICE_GPU || out->device == DEVICE_GPU)
+            && RPL_GPU_PREFERABLE(in->size / 2)) {
+        tensor_geglu_gpu(out, in, dim);
+        return;
+    }
+    if (in->device == DEVICE_GPU)  tensor_from_gpu((Tensor*)in);
+    if (out->device == DEVICE_GPU) tensor_from_gpu(out);
+#endif
+    if (dim < 0) dim += in->dims;
+    uint32_t stride = 1;
+    for (uint32_t i = dim + 1; i < in->dims; i++) stride *= in->shape[i];
+    uint32_t half_dim = in->shape[dim] / 2;
+    uint32_t pre_dim = 1;
+    for (uint32_t i = 0; i < dim; i++) pre_dim *= in->shape[i];
+
+    #pragma omp parallel for collapse(2)
+    for (uint32_t p = 0; p < pre_dim; p++) {
+        for (uint32_t h = 0; h < half_dim; h++) {
+            for (uint32_t s = 0; s < stride; s++) {
+                uint32_t in_idx1 = p * (half_dim * 2) * stride + h * stride + s;
+                uint32_t in_idx2 = p * (half_dim * 2) * stride + (h + half_dim) * stride + s;
+                uint32_t out_idx = p * half_dim * stride + h * stride + s;
+                
+                float x = in->data[in_idx1];
+                float gate = in->data[in_idx2];
+                float inner = 0.7978845608f * (x + 0.044715f * x * x * x);
+                float gelu = 0.5f * x * (1.0f + tanhf(inner));
+                out->data[out_idx] = gelu * gate;
+            }
+        }
+    }
 }

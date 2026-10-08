@@ -167,24 +167,74 @@ PerChannelQuantizedTensor* tensor_quantize_per_channel(const Tensor* input,
         float min_val = FLT_MAX, max_val = -FLT_MAX;
         
         // Find min/max for this channel
+#if RPITORCH_HAS_NEON
+        float32x4_t vmin = vdupq_n_f32(FLT_MAX);
+        float32x4_t vmax = vdupq_n_f32(-FLT_MAX);
+        uint32_t i = 0;
+        for (; i + 4 <= qt->channel_size; i += 4) {
+            uint32_t idx = c * qt->channel_size + i;
+            float32x4_t v = vld1q_f32(&input->data[idx]);
+            vmin = vminq_f32(vmin, v);
+            vmax = vmaxq_f32(vmax, v);
+        }
+        min_val = vminvq_f32(vmin);
+        max_val = vmaxvq_f32(vmax);
+        for (; i < qt->channel_size; i++) {
+            uint32_t idx = c * qt->channel_size + i;
+            if (input->data[idx] < min_val) min_val = input->data[idx];
+            if (input->data[idx] > max_val) max_val = input->data[idx];
+        }
+#else
         for (uint32_t i = 0; i < qt->channel_size; i++) {
             uint32_t idx = c * qt->channel_size + i;
             if (input->data[idx] < min_val) min_val = input->data[idx];
             if (input->data[idx] > max_val) max_val = input->data[idx];
         }
+#endif
         
         // Compute scale and zero point
         float abs_max = fmaxf(fabsf(min_val), fabsf(max_val));
         qt->scales[c] = abs_max / 127.0f;
         qt->zero_points[c] = 0;
+        float inv_scale = 1.0f / (qt->scales[c] != 0.0f ? qt->scales[c] : 1e-7f);
         
         // Quantize
-        for (uint32_t i = 0; i < qt->channel_size; i++) {
+#if RPITORCH_HAS_NEON
+        float32x4_t vinv = vdupq_n_f32(inv_scale);
+        i = 0;
+        for (; i + 16 <= qt->channel_size; i += 16) {
             uint32_t idx = c * qt->channel_size + i;
-            int32_t q = (int32_t)roundf(input->data[idx] / qt->scales[c]);
+            __builtin_prefetch(&input->data[idx + 32], 0, 1);
+            float32x4_t f0 = vmulq_f32(vld1q_f32(&input->data[idx]), vinv);
+            float32x4_t f1 = vmulq_f32(vld1q_f32(&input->data[idx + 4]), vinv);
+            float32x4_t f2 = vmulq_f32(vld1q_f32(&input->data[idx + 8]), vinv);
+            float32x4_t f3 = vmulq_f32(vld1q_f32(&input->data[idx + 12]), vinv);
+            
+            int32x4_t q0 = vcvtnq_s32_f32(f0);
+            int32x4_t q1 = vcvtnq_s32_f32(f1);
+            int32x4_t q2 = vcvtnq_s32_f32(f2);
+            int32x4_t q3 = vcvtnq_s32_f32(f3);
+            
+            int16x8_t s01 = vcombine_s16(vqmovn_s32(q0), vqmovn_s32(q1));
+            int16x8_t s23 = vcombine_s16(vqmovn_s32(q2), vqmovn_s32(q3));
+            
+            int8x16_t out8 = vcombine_s8(vqmovn_s16(s01), vqmovn_s16(s23));
+            vst1q_s8(&qt->data[idx], out8);
+        }
+        for (; i < qt->channel_size; i++) {
+            uint32_t idx = c * qt->channel_size + i;
+            int32_t q = (int32_t)roundf(input->data[idx] * inv_scale);
             q = (q < -128) ? -128 : (q > 127 ? 127 : q);
             qt->data[idx] = (int8_t)q;
         }
+#else
+        for (uint32_t i = 0; i < qt->channel_size; i++) {
+            uint32_t idx = c * qt->channel_size + i;
+            int32_t q = (int32_t)roundf(input->data[idx] * inv_scale);
+            q = (q < -128) ? -128 : (q > 127 ? 127 : q);
+            qt->data[idx] = (int8_t)q;
+        }
+#endif
     }
     
     return qt;
@@ -373,24 +423,28 @@ void linear_int8(const QuantizedTensor* input, const QuantizedTensor* weight,
             }
             
 #elif RPITORCH_HAS_NEON
-            // ARMv8 without DOTPROD: use vmlal for widening multiply-accumulate
+            // ARMv8 without DOTPROD: use vpadalq_s16 with dual accumulators
             uint32_t i = 0;
-            int32x4_t vsum = vdupq_n_s32(0);
+            int32x4_t vsum0 = vdupq_n_s32(0);
+            int32x4_t vsum1 = vdupq_n_s32(0);
             
+            for (; i + 16 <= in_features; i += 16) {
+                __builtin_prefetch(&in_ptr[i + 64], 0, 1);
+                __builtin_prefetch(&wt_ptr[i + 64], 0, 1);
+                int8x16_t vin = vld1q_s8(&in_ptr[i]);
+                int8x16_t vw  = vld1q_s8(&wt_ptr[i]);
+                int16x8_t p0 = vmull_s8(vget_low_s8(vin), vget_low_s8(vw));
+                int16x8_t p1 = vmull_high_s8(vin, vw);
+                vsum0 = vpadalq_s16(vsum0, p0);
+                vsum1 = vpadalq_s16(vsum1, p1);
+            }
+            int32x4_t vsum = vaddq_s32(vsum0, vsum1);
             for (; i + 8 <= in_features; i += 8) {
-                // Load 8 int8 values
                 int8x8_t vin = vld1_s8(&in_ptr[i]);
                 int8x8_t vw = vld1_s8(&wt_ptr[i]);
-                
-                // Widening multiply to int16
                 int16x8_t prod = vmull_s8(vin, vw);
-                
-                // Pairwise add to reduce to 4 int32
-                int32x4_t prod32 = vpaddlq_s16(prod);
-                vsum = vaddq_s32(vsum, prod32);
+                vsum = vpadalq_s16(vsum, prod);
             }
-            
-            // Horizontal sum
             sum = vaddvq_s32(vsum);
             
             // Handle tail

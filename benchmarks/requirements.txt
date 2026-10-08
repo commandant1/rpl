@@ -1,0 +1,5 @@
+numpy
+tensorflow
+# PyTorch installs are platform-dependent; uncomment/install appropriate wheel
+# torch
+# torchvision

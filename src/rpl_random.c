@@ -192,3 +192,188 @@ void tensor_meshgrid(const Tensor** inputs, uint32_t n_inputs, Tensor** outputs)
         }
     }
 }
+
+// ============================================================
+// Top-P / Nucleus Sampling
+// ============================================================
+
+typedef struct {
+    float prob;
+    uint32_t index;
+} ProbIndex;
+
+static int compare_probindex(const void* a, const void* b) {
+    float va = ((ProbIndex*)a)->prob;
+    float vb = ((ProbIndex*)b)->prob;
+    if (va > vb) return -1;
+    if (va < vb) return 1;
+    return 0;
+}
+
+uint32_t tensor_sample_top_p(const Tensor* logits, float top_p, float temperature) {
+    if (logits->dims != 1) return 0;
+    uint32_t n = logits->size;
+    ProbIndex* pi = (ProbIndex*)malloc(n * sizeof(ProbIndex));
+    
+    float max_logit = -1e9f;
+    for (uint32_t i = 0; i < n; i++) {
+        float val = logits->data[i] / (temperature + 1e-9f);
+        if (val > max_logit) max_logit = val;
+    }
+    
+    float sum_exp = 0.0f;
+    for (uint32_t i = 0; i < n; i++) {
+        pi[i].prob = expf((logits->data[i] / (temperature + 1e-9f)) - max_logit);
+        pi[i].index = i;
+        sum_exp += pi[i].prob;
+    }
+    for (uint32_t i = 0; i < n; i++) pi[i].prob /= sum_exp;
+    
+    qsort(pi, n, sizeof(ProbIndex), compare_probindex);
+    
+    float cumsum = 0.0f;
+    uint32_t cutoff_idx = n;
+    for (uint32_t i = 0; i < n; i++) {
+        cumsum += pi[i].prob;
+        if (cumsum > top_p) {
+            cutoff_idx = i + 1;
+            break;
+        }
+    }
+    
+    float new_sum = 0.0f;
+    for (uint32_t i = 0; i < cutoff_idx; i++) new_sum += pi[i].prob;
+    
+    ensure_rng();
+    float r = rand_uniform() * new_sum;
+    float current = 0.0f;
+    uint32_t sampled_idx = pi[cutoff_idx > 0 ? cutoff_idx - 1 : 0].index;
+    for (uint32_t i = 0; i < cutoff_idx; i++) {
+        current += pi[i].prob;
+        if (r <= current) {
+            sampled_idx = pi[i].index;
+            break;
+        }
+    }
+    
+    free(pi);
+    return sampled_idx;
+}
+
+// ============================================================
+// Top-K Sampling
+// ============================================================
+
+uint32_t tensor_sample_top_k(const Tensor* logits, uint32_t top_k, float temperature) {
+    if (logits->dims != 1) return 0;
+    uint32_t n = logits->size;
+    if (top_k > n) top_k = n;
+    
+    ProbIndex* pi = (ProbIndex*)malloc(n * sizeof(ProbIndex));
+    
+    float max_logit = -1e9f;
+    for (uint32_t i = 0; i < n; i++) {
+        float val = logits->data[i] / (temperature + 1e-9f);
+        if (val > max_logit) max_logit = val;
+    }
+    
+    for (uint32_t i = 0; i < n; i++) {
+        pi[i].prob = expf((logits->data[i] / (temperature + 1e-9f)) - max_logit);
+        pi[i].index = i;
+    }
+    
+    qsort(pi, n, sizeof(ProbIndex), compare_probindex);
+    
+    float sum_exp = 0.0f;
+    for (uint32_t i = 0; i < top_k; i++) sum_exp += pi[i].prob;
+    
+    ensure_rng();
+    float r = rand_uniform() * sum_exp;
+    float current = 0.0f;
+    uint32_t sampled_idx = pi[top_k > 0 ? top_k - 1 : 0].index;
+    for (uint32_t i = 0; i < top_k; i++) {
+        current += pi[i].prob;
+        if (r <= current) {
+            sampled_idx = pi[i].index;
+            break;
+        }
+    }
+    
+    free(pi);
+    return sampled_idx;
+}
+
+// ============================================================
+// Min-P Sampling
+// ============================================================
+
+uint32_t tensor_sample_min_p(const Tensor* logits, float min_p, float temperature) {
+    if (logits->dims != 1) return 0;
+    uint32_t n = logits->size;
+    ProbIndex* pi = (ProbIndex*)malloc(n * sizeof(ProbIndex));
+    
+    // 1. Find max logit to cap probs
+    float max_logit = -1e9f;
+    for (uint32_t i = 0; i < n; i++) {
+        float val = logits->data[i] / (temperature + 1e-9f);
+        if (val > max_logit) max_logit = val;
+    }
+    
+    // 2. Compute exp scaled probs
+    float max_prob = 0.0f;
+    for (uint32_t i = 0; i < n; i++) {
+        pi[i].prob = expf((logits->data[i] / (temperature + 1e-9f)) - max_logit);
+        pi[i].index = i;
+        if (pi[i].prob > max_prob) max_prob = pi[i].prob;
+    }
+    
+    // 3. Filter by min_p threshold threshold = min_p * max_prob
+    float threshold = min_p * max_prob;
+    float sum_exp = 0.0f;
+    
+    for (uint32_t i = 0; i < n; i++) {
+        if (pi[i].prob < threshold) {
+            pi[i].prob = 0.0f; // Mask out
+        }
+        sum_exp += pi[i].prob;
+    }
+    
+    // 4. Sample
+    ensure_rng();
+    float r = rand_uniform() * sum_exp;
+    float current = 0.0f;
+    uint32_t sampled_idx = pi[0].index;
+    
+    for (uint32_t i = 0; i < n; i++) {
+        if (pi[i].prob > 0.0f) {
+            current += pi[i].prob;
+            if (r <= current) {
+                sampled_idx = pi[i].index;
+                break;
+            }
+        }
+    }
+    
+    free(pi);
+    return sampled_idx;
+}
+
+// ============================================================
+// Repetition Penalty
+// ============================================================
+
+void tensor_apply_repetition_penalty(Tensor* logits, const uint32_t* generated_tokens, uint32_t count, float penalty) {
+    if (logits->dims != 1 || penalty == 1.0f || count == 0) return;
+    
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t token = generated_tokens[i];
+        if (token < logits->size) {
+            float logit = logits->data[token];
+            if (logit < 0.0f) {
+                logits->data[token] = logit * penalty;
+            } else {
+                logits->data[token] = logit / penalty;
+            }
+        }
+    }
+}

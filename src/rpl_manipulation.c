@@ -9,7 +9,9 @@
 
 Tensor* tensor_reshape(const Tensor* t, uint32_t nd, const uint32_t* ns) {
     Tensor* out = tensor_create(nd, ns, t->requires_grad);
-    memcpy(out->data, t->data, t->size * sizeof(float));
+    if (!out) return NULL;
+    uint32_t copy_size = (out->size < t->size) ? out->size : t->size;
+    memcpy(out->data, t->data, copy_size * sizeof(float));
     return out;
 }
 
@@ -255,6 +257,14 @@ Tensor* tensor_roll(const Tensor* t, int32_t shift, int32_t dim) {
 
 Tensor* tensor_clone(const Tensor* t) {
     Tensor* out = tensor_create(t->dims, t->shape, t->requires_grad);
+#ifdef USE_GPU
+    if (t->device == DEVICE_GPU) {
+        tensor_from_gpu((Tensor*)t);
+        memcpy(out->data, t->data, t->size * sizeof(float));
+        tensor_to_gpu(out);
+        return out;
+    }
+#endif
     memcpy(out->data, t->data, t->size * sizeof(float));
     return out;
 }

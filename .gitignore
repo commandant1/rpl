@@ -8,7 +8,9 @@ lib/
 
 # Compiled binaries
 check_sizes
+check_c_offsets
 reproduce_issue.py
+*.egg-info/
 
 # Python
 __pycache__/

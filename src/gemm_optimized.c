@@ -112,6 +112,75 @@ static inline void pack_B_8(const float* B, float* Bp, int K, int N, int ldb) {
 #endif
 }
 
+// Pack A^T into MR x K panels (A is stored K x M with leading dimension lda)
+// Element A_logical(i, k) is at A_stored[k * lda + i]
+// Since i is along the M dimension, elements i..i+7 are contiguous in memory!
+static inline void pack_A_8_trans(const float* A, float* Ap, int M, int K, int lda) {
+#if RPITORCH_HAS_NEON
+    for (int i = 0; i < M; i += MR) {
+        int rows = (i + MR <= M) ? MR : (M - i);
+        float* dst = &Ap[(i/MR) * K * MR];
+        
+        for (int k = 0; k < K; k++) {
+            if (rows == MR) {
+                float32x4_t lo = vld1q_f32(&A[k * lda + i + 0]);
+                float32x4_t hi = vld1q_f32(&A[k * lda + i + 4]);
+                vst1q_f32(&dst[k * MR + 0], lo);
+                vst1q_f32(&dst[k * MR + 4], hi);
+            } else {
+                for (int ii = 0; ii < MR; ii++) {
+                    dst[k * MR + ii] = (ii < rows) ? A[k * lda + i + ii] : 0.0f;
+                }
+            }
+        }
+    }
+#else
+    for (int i = 0; i < M; i += MR) {
+        int rows = (i + MR <= M) ? MR : (M - i);
+        float* dst = &Ap[(i/MR) * K * MR];
+        for (int k = 0; k < K; k++) {
+            for (int ii = 0; ii < MR; ii++) {
+                dst[k * MR + ii] = (ii < rows) ? A[k * lda + i + ii] : 0.0f;
+            }
+        }
+    }
+#endif
+}
+
+// Pack B^T into K x NR panels (B is stored N x K with leading dimension ldb)
+// Element B_logical(k, j) is at B_stored[j * ldb + k]
+static inline void pack_B_8_trans(const float* B, float* Bp, int K, int N, int ldb) {
+#if RPITORCH_HAS_NEON
+    for (int j = 0; j < N; j += NR) {
+        int cols = (j + NR <= N) ? NR : (N - j);
+        float* dst = &Bp[j * K];
+        
+        for (int k = 0; k < K; k++) {
+            if (cols == NR) {
+                float32x4_t lo = {B[(j+0)*ldb + k], B[(j+1)*ldb + k], B[(j+2)*ldb + k], B[(j+3)*ldb + k]};
+                float32x4_t hi = {B[(j+4)*ldb + k], B[(j+5)*ldb + k], B[(j+6)*ldb + k], B[(j+7)*ldb + k]};
+                vst1q_f32(&dst[k * NR + 0], lo);
+                vst1q_f32(&dst[k * NR + 4], hi);
+            } else {
+                for (int jj = 0; jj < NR; jj++) {
+                    dst[k * NR + jj] = (jj < cols) ? B[(j+jj)*ldb + k] : 0.0f;
+                }
+            }
+        }
+    }
+#else
+    for (int j = 0; j < N; j += NR) {
+        int cols = (j + NR <= N) ? NR : (N - j);
+        float* dst = &Bp[j * K];
+        for (int k = 0; k < K; k++) {
+            for (int jj = 0; jj < NR; jj++) {
+                dst[k * NR + jj] = (jj < cols) ? B[(j+jj)*ldb + k] : 0.0f;
+            }
+        }
+    }
+#endif
+}
+
 // 8x8 NEON micro-kernel with true FMA
 // Uses 16 accumulators (c00-c77) + 8 A-loads + 8 B-loads = 32 registers
 static inline void __attribute__((hot)) gemm_micro_kernel_8x8(
@@ -231,19 +300,279 @@ static inline void __attribute__((hot)) gemm_micro_kernel_8x8(
 #endif
 }
 
+// 8x8 NEON micro-kernel edge handler
+// Accumulates tile into a local 8x8 buffer, then writes only valid mr x nr elements to C
+static inline void __attribute__((hot)) gemm_micro_kernel_8x8_edge(
+    const float* restrict Ap,
+    const float* restrict Bp,
+    float* restrict C,
+    int ldc,
+    int K,
+    int mr,
+    int nr
+) {
+#if RPITORCH_HAS_NEON
+    float32x4_t c00 = vdupq_n_f32(0.0f), c01 = vdupq_n_f32(0.0f);
+    float32x4_t c10 = vdupq_n_f32(0.0f), c11 = vdupq_n_f32(0.0f);
+    float32x4_t c20 = vdupq_n_f32(0.0f), c21 = vdupq_n_f32(0.0f);
+    float32x4_t c30 = vdupq_n_f32(0.0f), c31 = vdupq_n_f32(0.0f);
+    float32x4_t c40 = vdupq_n_f32(0.0f), c41 = vdupq_n_f32(0.0f);
+    float32x4_t c50 = vdupq_n_f32(0.0f), c51 = vdupq_n_f32(0.0f);
+    float32x4_t c60 = vdupq_n_f32(0.0f), c61 = vdupq_n_f32(0.0f);
+    float32x4_t c70 = vdupq_n_f32(0.0f), c71 = vdupq_n_f32(0.0f);
+
+    int k = 0;
+    for (; k + 4 <= K; k += 4) {
+        #define ITERATION_EDGE(kk) do { \
+            float32x4_t a_lo = vld1q_f32(&Ap[(k+(kk))*MR + 0]); \
+            float32x4_t a_hi = vld1q_f32(&Ap[(k+(kk))*MR + 4]); \
+            float32x4_t b_lo = vld1q_f32(&Bp[(k+(kk))*NR + 0]); \
+            float32x4_t b_hi = vld1q_f32(&Bp[(k+(kk))*NR + 4]); \
+            \
+            c00 = vfmaq_laneq_f32(c00, b_lo, a_lo, 0); c01 = vfmaq_laneq_f32(c01, b_hi, a_lo, 0); \
+            c10 = vfmaq_laneq_f32(c10, b_lo, a_lo, 1); c11 = vfmaq_laneq_f32(c11, b_hi, a_lo, 1); \
+            c20 = vfmaq_laneq_f32(c20, b_lo, a_lo, 2); c21 = vfmaq_laneq_f32(c21, b_hi, a_lo, 2); \
+            c30 = vfmaq_laneq_f32(c30, b_lo, a_lo, 3); c31 = vfmaq_laneq_f32(c31, b_hi, a_lo, 3); \
+            c40 = vfmaq_laneq_f32(c40, b_lo, a_hi, 0); c41 = vfmaq_laneq_f32(c41, b_hi, a_hi, 0); \
+            c50 = vfmaq_laneq_f32(c50, b_lo, a_hi, 1); c51 = vfmaq_laneq_f32(c51, b_hi, a_hi, 1); \
+            c60 = vfmaq_laneq_f32(c60, b_lo, a_hi, 2); c61 = vfmaq_laneq_f32(c61, b_hi, a_hi, 2); \
+            c70 = vfmaq_laneq_f32(c70, b_lo, a_hi, 3); c71 = vfmaq_laneq_f32(c71, b_hi, a_hi, 3); \
+        } while(0)
+
+        ITERATION_EDGE(0);
+        ITERATION_EDGE(1);
+        ITERATION_EDGE(2);
+        ITERATION_EDGE(3);
+
+        #undef ITERATION_EDGE
+    }
+
+    for (; k < K; k++) {
+        float32x4_t a_lo = vld1q_f32(&Ap[k*MR + 0]);
+        float32x4_t a_hi = vld1q_f32(&Ap[k*MR + 4]);
+        float32x4_t b_lo = vld1q_f32(&Bp[k*NR + 0]);
+        float32x4_t b_hi = vld1q_f32(&Bp[k*NR + 4]);
+
+        c00 = vfmaq_laneq_f32(c00, b_lo, a_lo, 0); c01 = vfmaq_laneq_f32(c01, b_hi, a_lo, 0);
+        c10 = vfmaq_laneq_f32(c10, b_lo, a_lo, 1); c11 = vfmaq_laneq_f32(c11, b_hi, a_lo, 1);
+        c20 = vfmaq_laneq_f32(c20, b_lo, a_lo, 2); c21 = vfmaq_laneq_f32(c21, b_hi, a_lo, 2);
+        c30 = vfmaq_laneq_f32(c30, b_lo, a_lo, 3); c31 = vfmaq_laneq_f32(c31, b_hi, a_lo, 3);
+        c40 = vfmaq_laneq_f32(c40, b_lo, a_hi, 0); c41 = vfmaq_laneq_f32(c41, b_hi, a_hi, 0);
+        c50 = vfmaq_laneq_f32(c50, b_lo, a_hi, 1); c51 = vfmaq_laneq_f32(c51, b_hi, a_hi, 1);
+        c60 = vfmaq_laneq_f32(c60, b_lo, a_hi, 2); c61 = vfmaq_laneq_f32(c61, b_hi, a_hi, 2);
+        c70 = vfmaq_laneq_f32(c70, b_lo, a_hi, 3); c71 = vfmaq_laneq_f32(c71, b_hi, a_hi, 3);
+    }
+
+    // Store into local tile
+    float tile[8][8];
+    vst1q_f32(&tile[0][0], c00); vst1q_f32(&tile[0][4], c01);
+    vst1q_f32(&tile[1][0], c10); vst1q_f32(&tile[1][4], c11);
+    vst1q_f32(&tile[2][0], c20); vst1q_f32(&tile[2][4], c21);
+    vst1q_f32(&tile[3][0], c30); vst1q_f32(&tile[3][4], c31);
+    vst1q_f32(&tile[4][0], c40); vst1q_f32(&tile[4][4], c41);
+    vst1q_f32(&tile[5][0], c50); vst1q_f32(&tile[5][4], c51);
+    vst1q_f32(&tile[6][0], c60); vst1q_f32(&tile[6][4], c61);
+    vst1q_f32(&tile[7][0], c70); vst1q_f32(&tile[7][4], c71);
+
+    // Accumulate only valid mr x nr elements into C
+    for (int i = 0; i < mr; i++) {
+        for (int j = 0; j < nr; j++) {
+            C[i * ldc + j] += tile[i][j];
+        }
+    }
+#else
+    for (int k = 0; k < K; k++) {
+        for (int i = 0; i < mr; i++) {
+            float a_val = Ap[k*MR + i];
+            for (int j = 0; j < nr; j++) {
+                C[i*ldc + j] += a_val * Bp[k*NR + j];
+            }
+        }
+    }
+#endif
+}
+
 // Cleanup buffers — Ac_local is thread-local and freed on thread exit via the destructor
 // registered in parallel_gemm_optimized; Bc is local per-call (see below).
 void gemm_init_buffers() {}   // no-op: buffers are lazily allocated
 
 void gemm_free_buffers() {
-    // Thread-local Ac_local freed on thread exit.
-    // Nothing global to free anymore.
+    if (Ac_local) {
+        rpitorch_aligned_free(Ac_local);
+        Ac_local = NULL;
+        Ac_local_size = 0;
+    }
 }
 
 // Optimized GEMM with 5-level blocking.
 // NOT thread-safe to call recursively from inside an OMP parallel region.
 // Callers that want outer parallelism must call parallel_gemm_optimized which
 // manages its own omp parallel internally.
+void gemm_optimized_cortex_a72_trans(
+    const float* A,
+    const float* B,
+    float* C,
+    int M, int N, int K,
+    int lda, int ldb, int ldc,
+    bool trans_a, bool trans_b
+) {
+    if (M <= 0 || N <= 0 || K <= 0) return;
+
+    // Allocate Bc locally per call — eliminates the global shared-pointer race.
+    // Padded to multiples of NR and KC.
+    const int max_nc = (N < NC) ? ((N + NR - 1) / NR * NR) : NC;
+    const int max_kc = (K < KC) ? K : KC;
+    const size_t bc_bytes = (size_t)max_nc * (size_t)max_kc * sizeof(float);
+    const size_t ac_max_bytes = (size_t)MC * (size_t)KC * sizeof(float);
+
+    if (omp_in_parallel()) {
+        // Sequential/Single-threaded execution because we are already in an active parallel region
+        float* Bc = (float*)rpitorch_aligned_alloc(64, bc_bytes > 0 ? bc_bytes : 64);
+
+        // Ensure thread-local A buffer is large enough for any MC x KC panel
+        if (Ac_local == NULL || Ac_local_size < ac_max_bytes) {
+            if (Ac_local) rpitorch_aligned_free(Ac_local);
+            Ac_local = (float*)rpitorch_aligned_alloc(64, ac_max_bytes);
+            Ac_local_size = ac_max_bytes;
+        }
+
+        for (int jc = 0; jc < N; jc += NC) {
+            int nc = (jc + NC > N) ? (N - jc) : NC;
+
+            for (int pc = 0; pc < K; pc += KC) {
+                int kc = (pc + KC > K) ? (K - pc) : KC;
+
+                const float* b_blk = trans_b ? &B[jc * ldb + pc] : &B[pc * ldb + jc];
+                if (trans_b) pack_B_8_trans(b_blk, Bc, kc, nc, ldb);
+                else pack_B_8(b_blk, Bc, kc, nc, ldb);
+
+                for (int ic = 0; ic < M; ic += MC) {
+                    int mc = (ic + MC > M) ? (M - ic) : MC;
+
+                    const float* a_blk = trans_a ? &A[pc * lda + ic] : &A[ic * lda + pc];
+                    if (trans_a) pack_A_8_trans(a_blk, Ac_local, mc, kc, lda);
+                    else pack_A_8(a_blk, Ac_local, mc, kc, lda);
+
+                    for (int jr = 0; jr < nc; jr += NR) {
+                        int nr_cur = (jr + NR <= nc) ? NR : (nc - jr);
+                        for (int ir = 0; ir < mc; ir += MR) {
+                            int mr_cur = (ir + MR <= mc) ? MR : (mc - ir);
+                            if (mr_cur == MR && nr_cur == NR) {
+                                gemm_micro_kernel_8x8(
+                                    &Ac_local[(ir / MR) * kc * MR],
+                                    &Bc[jr * kc],
+                                    &C[(ic + ir) * ldc + jc + jr],
+                                    ldc,
+                                    kc
+                                );
+                            } else {
+                                gemm_micro_kernel_8x8_edge(
+                                    &Ac_local[(ir / MR) * kc * MR],
+                                    &Bc[jr * kc],
+                                    &C[(ic + ir) * ldc + jc + jr],
+                                    ldc,
+                                    kc,
+                                    mr_cur,
+                                    nr_cur
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        rpitorch_aligned_free(Bc);
+    } else {
+        // Multi-threaded execution with task-based double-buffered B packing
+        float* Bc[2];
+        Bc[0] = (float*)rpitorch_aligned_alloc(64, bc_bytes > 0 ? bc_bytes : 64);
+        Bc[1] = (float*)rpitorch_aligned_alloc(64, bc_bytes > 0 ? bc_bytes : 64);
+
+        for (int jc = 0; jc < N; jc += NC) {
+            int nc = (jc + NC > N) ? (N - jc) : NC;
+
+            // Pack first block of B into Bc[0]
+            int kc_first = (0 + KC > K) ? (K - 0) : KC;
+            const float* b_first = trans_b ? &B[jc * ldb + 0] : &B[0 * ldb + jc];
+            if (trans_b) pack_B_8_trans(b_first, Bc[0], kc_first, nc, ldb);
+            else pack_B_8(b_first, Bc[0], kc_first, nc, ldb);
+
+            for (int pc = 0; pc < K; pc += KC) {
+                int kc = (pc + KC > K) ? (K - pc) : KC;
+                int buf_idx = (pc / KC) % 2;
+                int next_buf_idx = 1 - buf_idx;
+                int next_pc = pc + KC;
+                int next_kc = (next_pc + KC > K) ? (K - next_pc) : KC;
+
+                #pragma omp parallel
+                {
+                    // Ensure thread-local A buffer is large enough for any MC x KC panel
+                    if (Ac_local == NULL || Ac_local_size < ac_max_bytes) {
+                        if (Ac_local) rpitorch_aligned_free(Ac_local);
+                        Ac_local = (float*)rpitorch_aligned_alloc(64, ac_max_bytes);
+                        Ac_local_size = ac_max_bytes;
+                    }
+
+                    #pragma omp single nowait
+                    {
+                        if (next_pc < K) {
+                            #pragma omp task
+                            {
+                                const float* next_b = trans_b ? &B[jc * ldb + next_pc] : &B[next_pc * ldb + jc];
+                                if (trans_b) pack_B_8_trans(next_b, Bc[next_buf_idx], next_kc, nc, ldb);
+                                else pack_B_8(next_b, Bc[next_buf_idx], next_kc, nc, ldb);
+                            }
+                        }
+                    }
+
+                    #pragma omp for schedule(dynamic, 1)
+                    for (int ic = 0; ic < M; ic += MC) {
+                        int mc = (ic + MC > M) ? (M - ic) : MC;
+
+                        // Pack A panel (thread-local)
+                        const float* a_blk = trans_a ? &A[pc * lda + ic] : &A[ic * lda + pc];
+                        if (trans_a) pack_A_8_trans(a_blk, Ac_local, mc, kc, lda);
+                        else pack_A_8(a_blk, Ac_local, mc, kc, lda);
+
+                        // Micro-panel loop
+                        for (int jr = 0; jr < nc; jr += NR) {
+                            int nr_cur = (jr + NR <= nc) ? NR : (nc - jr);
+                            for (int ir = 0; ir < mc; ir += MR) {
+                                int mr_cur = (ir + MR <= mc) ? MR : (mc - ir);
+                                if (mr_cur == MR && nr_cur == NR) {
+                                    gemm_micro_kernel_8x8(
+                                        &Ac_local[(ir / MR) * kc * MR],
+                                        &Bc[buf_idx][jr * kc],
+                                        &C[(ic + ir) * ldc + jc + jr],
+                                        ldc,
+                                        kc
+                                    );
+                                } else {
+                                    gemm_micro_kernel_8x8_edge(
+                                        &Ac_local[(ir / MR) * kc * MR],
+                                        &Bc[buf_idx][jr * kc],
+                                        &C[(ic + ir) * ldc + jc + jr],
+                                        ldc,
+                                        kc,
+                                        mr_cur,
+                                        nr_cur
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Wait for next block packing task to finish before leaving parallel region
+                    #pragma omp taskwait
+                }
+            }
+        }
+
+        rpitorch_aligned_free(Bc[0]);
+        rpitorch_aligned_free(Bc[1]);
+    }
+}
+
 void gemm_optimized_cortex_a72(
     const float* A,
     const float* B,
@@ -251,100 +580,65 @@ void gemm_optimized_cortex_a72(
     int M, int N, int K,
     int lda, int ldb, int ldc
 ) {
-    // Allocate Bc locally per call — eliminates the global shared-pointer race.
-    // At most (NC * KC) floats; worst case KC=256, NC=2048 → 512 KB.
-    const int Nc   = (N < NC) ? N : NC;
-    const int Kc   = (K < KC) ? K : KC;
-    const size_t bc_bytes = (size_t)((N + NR - 1) / NR * NR) *
-                            (size_t)((K + KC - 1) / KC * KC) * sizeof(float);
-    float* Bc = (float*)rpitorch_aligned_alloc(64, bc_bytes > 0 ? bc_bytes : 64);
-    (void)Nc; (void)Kc;
+    gemm_optimized_cortex_a72_trans(A, B, C, M, N, K, lda, ldb, ldc, false, false);
+}
 
-    // Level 5: Outer N-loop (L2 blocking for B)
-    for (int jc = 0; jc < N; jc += NC) {
-        int nc = (jc + NC > N) ? (N - jc) : NC;
-
-        // Level 4: K-loop (L1 blocking)
-        for (int pc = 0; pc < K; pc += KC) {
-            int kc = (pc + KC > K) ? (K - pc) : KC;
-
-            // Pack B panel — single-threaded here; caller parallelises at a higher level.
-            pack_B_8(&B[pc * ldb + jc], Bc, kc, nc, ldb);
-
-            // Ensure thread-local A buffer
-            size_t ac_needed = (size_t)MC * kc * sizeof(float);
-            if (Ac_local == NULL || Ac_local_size < ac_needed) {
-                if (Ac_local) rpitorch_aligned_free(Ac_local);
-                Ac_local = (float*)rpitorch_aligned_alloc(64, ac_needed);
-                Ac_local_size = ac_needed;
-            }
-
-            // Level 3: M-loop — parallelised here (safe: Bc is local, Ac is TLS)
-            #pragma omp parallel for schedule(dynamic, 1)
-            for (int ic = 0; ic < M; ic += MC) {
-                int mc = (ic + MC > M) ? (M - ic) : MC;
-
-                // Resize TLS A buffer if this thread needs more space
-                if (Ac_local == NULL || Ac_local_size < (size_t)mc * kc * sizeof(float)) {
-                    if (Ac_local) rpitorch_aligned_free(Ac_local);
-                    Ac_local = (float*)rpitorch_aligned_alloc(64, (size_t)mc * kc * sizeof(float));
-                    Ac_local_size = (size_t)mc * kc * sizeof(float);
+void parallel_gemm_optimized_trans(const float* A, const float* B, float* C,
+                                   uint32_t M, uint32_t N, uint32_t K,
+                                   bool trans_a, bool trans_b) {
+    if (M == 0 || N == 0 || K == 0) return;
+    // Small matrix: NEON 4-wide for M<8 or N<8 (avoids 8x8 tile overrun)
+    if (M < MR || N < NR) {
+#if RPITORCH_HAS_NEON
+        for (uint32_t i = 0; i < M; i++) {
+            for (uint32_t j = 0; j < N; j++) {
+                float32x4_t vsum = vdupq_n_f32(0.0f);
+                uint32_t k = 0;
+                for (; k + 4 <= K; k += 4) {
+                    float a0 = trans_a ? A[(k+0)*M + i] : A[i*K + k+0];
+                    float a1 = trans_a ? A[(k+1)*M + i] : A[i*K + k+1];
+                    float a2 = trans_a ? A[(k+2)*M + i] : A[i*K + k+2];
+                    float a3 = trans_a ? A[(k+3)*M + i] : A[i*K + k+3];
+                    float b0 = trans_b ? B[j*K + k+0]   : B[(k+0)*N + j];
+                    float b1 = trans_b ? B[j*K + k+1]   : B[(k+1)*N + j];
+                    float b2 = trans_b ? B[j*K + k+2]   : B[(k+2)*N + j];
+                    float b3 = trans_b ? B[j*K + k+3]   : B[(k+3)*N + j];
+                    float32x4_t va = {a0, a1, a2, a3};
+                    float32x4_t vb = {b0, b1, b2, b3};
+                    vsum = vfmaq_f32(vsum, va, vb);
                 }
-
-                // Pack A panel (thread-local)
-                pack_A_8(&A[ic * lda + pc], Ac_local, mc, kc, lda);
-
-                // Level 2: Micro-panel N-loop
-                for (int jr = 0; jr < nc; jr += NR) {
-                    // Level 1: Micro-panel M-loop
-                    for (int ir = 0; ir < mc; ir += MR) {
-                        gemm_micro_kernel_8x8(
-                            &Ac_local[(ir / MR) * kc * MR],
-                            &Bc[jr * kc],
-                            &C[(ic + ir) * ldc + jc + jr],
-                            ldc,
-                            kc
-                        );
-                    }
+                float sum = vaddvq_f32(vsum);
+                for (; k < K; k++) {
+                    float a_val = trans_a ? A[k*M + i] : A[i*K + k];
+                    float b_val = trans_b ? B[j*K + k] : B[k*N + j];
+                    sum += a_val * b_val;
                 }
+                C[i * N + j] += sum;
             }
         }
+#else
+        for (uint32_t i = 0; i < M; i++) {
+            for (uint32_t j = 0; j < N; j++) {
+                float sum = 0;
+                for (uint32_t k = 0; k < K; k++) {
+                    float a_val = trans_a ? A[k*M + i] : A[i*K + k];
+                    float b_val = trans_b ? B[j*K + k] : B[k*N + j];
+                    sum += a_val * b_val;
+                }
+                C[i * N + j] += sum;
+            }
+        }
+#endif
+        return;
     }
-
-    rpitorch_aligned_free(Bc);
+    int lda = trans_a ? M : K;
+    int ldb = trans_b ? K : N;
+    int ldc = N;
+    gemm_optimized_cortex_a72_trans(A, B, C, M, N, K, lda, ldb, ldc, trans_a, trans_b);
 }
 
 // Wrapper for tensor interface
 void parallel_gemm_optimized(const float* A, const float* B, float* C,
                              uint32_t M, uint32_t N, uint32_t K) {
-    // Small matrix: NEON 4-wide for M<8 or N<8 (avoids 8x8 tile overrun)
-    if (M < MR || N < NR) {
-#if RPITORCH_HAS_NEON
-        for (uint32_t i = 0; i < M; i++) {
-            uint32_t j = 0;
-            for (; j + 4 <= N; j += 4) {
-                float32x4_t sum = vdupq_n_f32(0.0f);
-                for (uint32_t k = 0; k < K; k++)
-                    sum = vfmaq_n_f32(sum, vld1q_f32(&B[k * N + j]), A[i * K + k]);
-                vst1q_f32(&C[i * N + j], vaddq_f32(vld1q_f32(&C[i * N + j]), sum));
-            }
-            for (; j < N; j++) {
-                float sum = 0;
-                for (uint32_t k = 0; k < K; k++)
-                    sum += A[i * K + k] * B[k * N + j];
-                C[i * N + j] += sum;
-            }
-        }
-#else
-        for (uint32_t i = 0; i < M; i++)
-            for (uint32_t j = 0; j < N; j++) {
-                float sum = 0;
-                for (uint32_t k = 0; k < K; k++)
-                    sum += A[i * K + k] * B[k * N + j];
-                C[i * N + j] += sum;
-            }
-#endif
-        return;
-    }
-    gemm_optimized_cortex_a72(A, B, C, M, N, K, K, N, N);
+    parallel_gemm_optimized_trans(A, B, C, M, N, K, false, false);
 }

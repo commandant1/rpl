@@ -1,0 +1,8 @@
+{
+  "framework": "rpl",
+  "epochs": 1,
+  "batch_size": 64,
+  "train_time_s": 0.6296448707580566,
+  "test_acc": 0.09765625,
+  "max_rss_bytes": 45342720
+}

@@ -18,6 +18,13 @@ int main() {
     printf("  device: %zu\n", offsetof(struct Tensor, device));
     printf("  gpu_buffer: %zu\n", offsetof(struct Tensor, gpu_buffer));
     printf("  is_leaf: %zu\n", offsetof(struct Tensor, is_leaf));
+    printf("  _visited: %zu\n", offsetof(struct Tensor, _visited));
+    printf("  _refcount: %zu\n", offsetof(struct Tensor, _refcount));
+    printf("  _op: %zu\n", offsetof(struct Tensor, _op));
+    printf("  _parents: %zu\n", offsetof(struct Tensor, _parents));
+    printf("  _n_parents: %zu\n", offsetof(struct Tensor, _n_parents));
+    printf("  _saved_scalar: %zu\n", offsetof(struct Tensor, _saved_scalar));
+    printf("  _grad_refcount: %zu\n", offsetof(struct Tensor, _grad_refcount));
     printf("  parent1: %zu\n", offsetof(struct Tensor, parent1));
     printf("  parent2: %zu\n", offsetof(struct Tensor, parent2));
     printf("  backward_fn: %zu\n", offsetof(struct Tensor, backward_fn));

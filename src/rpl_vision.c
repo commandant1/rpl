@@ -651,3 +651,104 @@ Tensor* spp_forward(SPPLayer* layer, const Tensor* input) {
     
     return output;
 }
+
+// ============================================================
+// ConvTranspose2d (Deconvolution / Fractionally-strided Conv)
+// ============================================================
+
+ConvTranspose2dLayer* conv_transpose2d_create(uint32_t in_channels, uint32_t out_channels,
+                                              uint32_t kernel_h, uint32_t kernel_w,
+                                              uint32_t stride_h, uint32_t stride_w,
+                                              uint32_t padding_h, uint32_t padding_w,
+                                              uint32_t out_pad_h, uint32_t out_pad_w) {
+    ConvTranspose2dLayer* layer = (ConvTranspose2dLayer*)calloc(1, sizeof(ConvTranspose2dLayer));
+    
+    layer->in_channels = in_channels;
+    layer->out_channels = out_channels;
+    layer->kernel_size[0] = kernel_h;
+    layer->kernel_size[1] = kernel_w;
+    layer->stride[0] = stride_h;
+    layer->stride[1] = stride_w;
+    layer->padding[0] = padding_h;
+    layer->padding[1] = padding_w;
+    layer->output_padding[0] = out_pad_h;
+    layer->output_padding[1] = out_pad_w;
+    
+    // PyTorch uses weight shape: [in_channels, out_channels, kernel_size[0], kernel_size[1]]
+    // (Note: std conv2d uses [out, in, k, k]).
+    uint32_t weight_shape[4] = {in_channels, out_channels, kernel_h, kernel_w};
+    layer->weight = tensor_create(4, weight_shape, true);
+    
+    uint32_t bias_shape[1] = {out_channels};
+    layer->bias = tensor_create(1, bias_shape, true);
+    
+    float std = 1.0f / sqrtf((float)(out_channels * kernel_h * kernel_w));
+    for (uint32_t i = 0; i < layer->weight->size; i++) {
+        layer->weight->data[i] = ((float)rand() / RAND_MAX - 0.5f) * 2.0f * std;
+    }
+    tensor_fill(layer->bias, 0.0f);
+    
+    return layer;
+}
+
+Tensor* conv_transpose2d_forward(ConvTranspose2dLayer* layer, const Tensor* input) {
+    // input: [batch, in_channels, in_h, in_w]
+    uint32_t batch = input->shape[0];
+    uint32_t in_h = input->shape[2];
+    uint32_t in_w = input->shape[3];
+    
+    uint32_t out_h = (in_h - 1) * layer->stride[0] - 2 * layer->padding[0] + layer->kernel_size[0] + layer->output_padding[0];
+    uint32_t out_w = (in_w - 1) * layer->stride[1] - 2 * layer->padding[1] + layer->kernel_size[1] + layer->output_padding[1];
+    
+    uint32_t output_shape[4] = {batch, layer->out_channels, out_h, out_w};
+    Tensor* output = tensor_create(4, output_shape, input->requires_grad);
+    
+    // Initialize with bias
+    for (uint32_t b = 0; b < batch; b++) {
+        for (uint32_t oc = 0; oc < layer->out_channels; oc++) {
+            float b_val = layer->bias->data[oc];
+            for (uint32_t oh = 0; oh < out_h; oh++) {
+                for (uint32_t ow = 0; ow < out_w; ow++) {
+                    output->data[((b * layer->out_channels + oc) * out_h + oh) * out_w + ow] = b_val;
+                }
+            }
+        }
+    }
+    
+    // Forward pass
+    #pragma omp parallel for collapse(4)
+    for (uint32_t b = 0; b < batch; b++) {
+        for (uint32_t ic = 0; ic < layer->in_channels; ic++) {
+            for (uint32_t ih = 0; ih < in_h; ih++) {
+                for (uint32_t iw = 0; iw < in_w; iw++) {
+                    float val = input->data[((b * layer->in_channels + ic) * in_h + ih) * in_w + iw];
+                    
+                    for (uint32_t oc = 0; oc < layer->out_channels; oc++) {
+                        for (uint32_t kh = 0; kh < layer->kernel_size[0]; kh++) {
+                            for (uint32_t kw = 0; kw < layer->kernel_size[1]; kw++) {
+                                int32_t oh = (int32_t)(ih * layer->stride[0]) - (int32_t)layer->padding[0] + (int32_t)kh;
+                                int32_t ow = (int32_t)(iw * layer->stride[1]) - (int32_t)layer->padding[1] + (int32_t)kw;
+                                
+                                if (oh >= 0 && oh < (int32_t)out_h && ow >= 0 && ow < (int32_t)out_w) {
+                                    float w_val = layer->weight->data[((ic * layer->out_channels + oc) * layer->kernel_size[0] + kh) * layer->kernel_size[1] + kw];
+                                    
+                                    #pragma omp atomic
+                                    output->data[((b * layer->out_channels + oc) * out_h + oh) * out_w + ow] += val * w_val;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    return output;
+}
+
+void conv_transpose2d_free(ConvTranspose2dLayer* layer) {
+    if (!layer) return;
+    tensor_free(layer->weight);
+    tensor_free(layer->bias);
+    free(layer);
+}

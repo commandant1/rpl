@@ -1,0 +1,13 @@
+{
+  "tflite": {
+    "error": "no_model",
+    "message": "No tflite model could be downloaded"
+  },
+  "rpl": {
+    "framework": "rpl",
+    "samples": 512,
+    "time_s": 0.24679851531982422,
+    "throughput_sps": 2074.5667749925615,
+    "max_rss_bytes": 80883712
+  }
+}

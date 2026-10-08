@@ -65,26 +65,34 @@ Tensor* linear_forward(Linear* layer, const Tensor* input) {
     tensor_fill(matmul_out, 0.0f);
     tensor_gemm(matmul_out, input, layer->weight, 1.0f, 0.0f, false, true);
     
-    if (matmul_out->requires_grad) {
+    if (rpl_is_grad_enabled() && matmul_out->requires_grad) {
         matmul_out->parent1 = (void*)input;
         matmul_out->parent2 = (void*)layer->weight;
         matmul_out->backward_fn = backward_matmul;
         matmul_out->is_leaf = false;
+        matmul_out->_op = OP_MATMUL;
+        matmul_out->_parents[0] = (Tensor*)input;
+        matmul_out->_parents[1] = (Tensor*)layer->weight;
+        matmul_out->_n_parents = 2;
+        tensor_retain((Tensor*)input);
+        tensor_retain((Tensor*)layer->weight);
+    } else {
+        matmul_out->requires_grad = false;
     }
     
     // 2. Add bias
     Tensor* out = tensor_create(2, output_shape, matmul_out->requires_grad || layer->bias->requires_grad);
     tensor_add_out(out, matmul_out, layer->bias);
     
-    // Note: In a real system, we'd manage the memory of matmul_out.
-    // Here, it's part of the autograd graph, so it must stay alive until backward.
+    // Release local reference to matmul_out
+    tensor_release(matmul_out);
     
     return out;
 }
 
 void linear_free(Linear* layer) {
-    tensor_free(layer->weight);
-    tensor_free(layer->bias);
+    tensor_release(layer->weight);
+    tensor_release(layer->bias);
     free(layer);
 }
 
@@ -103,6 +111,25 @@ struct Conv2dLayer {
     uint32_t dilation;
     uint32_t groups;
 };
+
+static void conv2d_build_graph(Tensor* output, const Tensor* input, Conv2dLayer* layer) {
+    if (rpl_is_grad_enabled() && (input->requires_grad || layer->weight->requires_grad || layer->bias->requires_grad)) {
+        output->requires_grad = true;
+        output->is_leaf = false;
+        output->_op = OP_CONV2D;
+        output->_parents[0] = (Tensor*)input;
+        output->_parents[1] = layer->weight;
+        output->_parents[2] = layer->bias;
+        output->_n_parents = 3;
+        uint32_t encoded = (layer->stride & 0xFFFF) | ((layer->padding & 0xFFFF) << 16);
+        output->_saved_scalar = (float)encoded;
+        tensor_retain((Tensor*)input);
+        tensor_retain(layer->weight);
+        tensor_retain(layer->bias);
+    } else {
+        output->requires_grad = false;
+    }
+}
 
 Conv2dLayer* conv2d_create(uint32_t in_channels, uint32_t out_channels,
                            uint32_t kernel_size, uint32_t stride, uint32_t padding) {
@@ -170,6 +197,7 @@ Tensor* conv2d_forward(Conv2dLayer* layer, const Tensor* input) {
                     for (uint32_t i = 0; i < out_h * out_w; i++) dst[i] += bv;
                 }
             }
+            conv2d_build_graph(output, input, layer);
             return output;
         }
     }
@@ -195,6 +223,7 @@ Tensor* conv2d_forward(Conv2dLayer* layer, const Tensor* input) {
                 }
             }
         }
+        conv2d_build_graph(output, input, layer);
         return output;
     }
     
@@ -254,12 +283,13 @@ Tensor* conv2d_forward(Conv2dLayer* layer, const Tensor* input) {
     }
 
     rpitorch_aligned_free(col_buf);
+    conv2d_build_graph(output, input, layer);
     return output;
 }
 
 void conv2d_free(Conv2dLayer* layer) {
-    tensor_free(layer->weight);
-    tensor_free(layer->bias);
+    tensor_release(layer->weight);
+    tensor_release(layer->bias);
     free(layer);
 }
 
@@ -302,7 +332,7 @@ BatchNorm2dLayer* batchnorm2d_create(uint32_t num_features, float momentum, floa
 }
 
 Tensor* batchnorm2d_forward(BatchNorm2dLayer* layer, const Tensor* input) {
-    Tensor* output = tensor_create(input->dims, input->shape, input->requires_grad);
+    Tensor* output = tensor_create(input->dims, input->shape, input->requires_grad || layer->weight->requires_grad || layer->bias->requires_grad);
     
     tensor_batchnorm2d(output, input,
                       layer->weight->data, layer->bias->data,
@@ -313,14 +343,30 @@ Tensor* batchnorm2d_forward(BatchNorm2dLayer* layer, const Tensor* input) {
         layer->num_batches_tracked++;
     }
     
+    if (rpl_is_grad_enabled() && (input->requires_grad || layer->weight->requires_grad || layer->bias->requires_grad)) {
+        output->requires_grad = true;
+        output->is_leaf = false;
+        output->_op = OP_BATCHNORM;
+        output->_parents[0] = (Tensor*)input;
+        output->_parents[1] = layer->weight;
+        output->_parents[2] = layer->bias;
+        output->_n_parents = 3;
+        output->_saved_scalar = layer->eps;
+        tensor_retain((Tensor*)input);
+        tensor_retain(layer->weight);
+        tensor_retain(layer->bias);
+    } else {
+        output->requires_grad = false;
+    }
+    
     return output;
 }
 
 void batchnorm2d_free(BatchNorm2dLayer* layer) {
-    tensor_free(layer->weight);
-    tensor_free(layer->bias);
-    tensor_free(layer->running_mean);
-    tensor_free(layer->running_var);
+    tensor_release(layer->weight);
+    tensor_release(layer->bias);
+    tensor_release(layer->running_mean);
+    tensor_release(layer->running_var);
     free(layer);
 }
 
@@ -444,12 +490,269 @@ Tensor* layer_norm_forward(LayerNormLayer* layer, const Tensor* input) {
 #endif
     }
     
+    if (rpl_is_grad_enabled() && (input->requires_grad || layer->weight->requires_grad || layer->bias->requires_grad)) {
+        output->requires_grad = true;
+        output->is_leaf = false;
+        output->_op = OP_LAYERNORM;
+        output->_parents[0] = (Tensor*)input;
+        output->_parents[1] = layer->weight;
+        output->_parents[2] = layer->bias;
+        output->_n_parents = 3;
+        output->_saved_scalar = layer->eps;
+        tensor_retain((Tensor*)input);
+        tensor_retain(layer->weight);
+        tensor_retain(layer->bias);
+    } else {
+        output->requires_grad = false;
+    }
+    
     return output;
 }
 
 void layer_norm_free(LayerNormLayer* layer) {
-    tensor_free(layer->weight);
-    tensor_free(layer->bias);
+    tensor_release(layer->weight);
+    tensor_release(layer->bias);
+    free(layer);
+}
+
+// ============================================================
+// GroupNorm
+// ============================================================
+
+struct GroupNormLayer {
+    uint32_t num_groups;
+    uint32_t num_channels;
+    Tensor* weight;
+    Tensor* bias;
+    float eps;
+};
+
+GroupNormLayer* group_norm_create(uint32_t num_groups, uint32_t num_channels, float eps) {
+    GroupNormLayer* layer = (GroupNormLayer*)calloc(1, sizeof(GroupNormLayer));
+    
+    layer->num_groups = num_groups;
+    layer->num_channels = num_channels;
+    layer->eps = eps;
+    
+    uint32_t shape[1] = {num_channels};
+    layer->weight = tensor_create(1, shape, true);
+    layer->bias = tensor_create(1, shape, true);
+    
+    tensor_fill(layer->weight, 1.0f);
+    tensor_fill(layer->bias, 0.0f);
+    
+    return layer;
+}
+
+Tensor* group_norm_forward(GroupNormLayer* layer, const Tensor* input) {
+    // input shape: [batch, num_channels, h, w] or similar spatial dims.
+    uint32_t batch = input->shape[0];
+    uint32_t spatial_size = input->size / (batch * layer->num_channels);
+
+    uint32_t channels_per_group = layer->num_channels / layer->num_groups;
+    uint32_t group_size = channels_per_group * spatial_size;
+
+    Tensor* output = tensor_create(input->dims, input->shape, input->requires_grad);
+    float inv_group_size = 1.0f / group_size;
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (uint32_t b = 0; b < batch; b++) {
+        for (uint32_t g = 0; g < layer->num_groups; g++) {
+            const float* data = &input->data[(b * layer->num_groups + g) * group_size];
+            float*       out  = &output->data[(b * layer->num_groups + g) * group_size];
+
+#if RPITORCH_HAS_NEON
+            // -- Mean (4 accumulators) ----------------------------------------
+            float32x4_t v0 = vdupq_n_f32(0.f), v1 = v0, v2 = v0, v3 = v0;
+            uint32_t i = 0;
+            for (; i + 16 <= group_size; i += 16) {
+                __builtin_prefetch(&data[i + 64], 0, 1);
+                v0 = vaddq_f32(v0, vld1q_f32(&data[i]));
+                v1 = vaddq_f32(v1, vld1q_f32(&data[i + 4]));
+                v2 = vaddq_f32(v2, vld1q_f32(&data[i + 8]));
+                v3 = vaddq_f32(v3, vld1q_f32(&data[i + 12]));
+            }
+            v0 = vaddq_f32(vaddq_f32(v0, v1), vaddq_f32(v2, v3));
+            float mean = vaddvq_f32(v0);
+            for (; i < group_size; i++) mean += data[i];
+            mean *= inv_group_size;
+
+            // -- Variance (4 accumulators) ------------------------------------
+            float32x4_t vmean = vdupq_n_f32(mean);
+            v0 = vdupq_n_f32(0.f); v1 = v0; v2 = v0; v3 = v0;
+            for (i = 0; i + 16 <= group_size; i += 16) {
+                float32x4_t d0 = vsubq_f32(vld1q_f32(&data[i]),      vmean);
+                float32x4_t d1 = vsubq_f32(vld1q_f32(&data[i + 4]),  vmean);
+                float32x4_t d2 = vsubq_f32(vld1q_f32(&data[i + 8]),  vmean);
+                float32x4_t d3 = vsubq_f32(vld1q_f32(&data[i + 12]), vmean);
+                v0 = vfmaq_f32(v0, d0, d0);
+                v1 = vfmaq_f32(v1, d1, d1);
+                v2 = vfmaq_f32(v2, d2, d2);
+                v3 = vfmaq_f32(v3, d3, d3);
+            }
+            v0 = vaddq_f32(vaddq_f32(v0, v1), vaddq_f32(v2, v3));
+            float var = vaddvq_f32(v0);
+            for (; i < group_size; i++) { float d = data[i] - mean; var += d * d; }
+            var *= inv_group_size;
+
+            // -- Fast reciprocal sqrt: 2x Newton-Raphson ----------------------
+            float var_eps = var + layer->eps;
+            float32x4_t vve  = vdupq_n_f32(var_eps);
+            float32x4_t est  = vrsqrteq_f32(vve);
+            est = vmulq_f32(est, vrsqrtsq_f32(vmulq_f32(vve, est), est));
+            est = vmulq_f32(est, vrsqrtsq_f32(vmulq_f32(vve, est), est));
+            float inv_std = vgetq_lane_f32(est, 0);
+            float32x4_t vinv_std = vdupq_n_f32(inv_std);
+
+            // -- Normalize + affine scale  (8-wide, per-channel weight/bias) --
+            for (uint32_t c = 0; c < channels_per_group; c++) {
+                uint32_t gc = g * channels_per_group + c;
+                float32x4_t vw = vdupq_n_f32(layer->weight->data[gc]);
+                float32x4_t vb = vdupq_n_f32(layer->bias->data[gc]);
+                const float* src = &data[c * spatial_size];
+                float*       dst = &out[c * spatial_size];
+
+                for (i = 0; i + 8 <= spatial_size; i += 8) {
+                    float32x4_t d0 = vsubq_f32(vld1q_f32(&src[i]),   vmean);
+                    float32x4_t d1 = vsubq_f32(vld1q_f32(&src[i+4]), vmean);
+                    vst1q_f32(&dst[i],   vfmaq_f32(vb, vmulq_f32(d0, vinv_std), vw));
+                    vst1q_f32(&dst[i+4], vfmaq_f32(vb, vmulq_f32(d1, vinv_std), vw));
+                }
+                for (; i < spatial_size; i++)
+                    dst[i] = (src[i] - mean) * inv_std * layer->weight->data[gc] + layer->bias->data[gc];
+            }
+#else
+            // Scalar fallback
+            float mean = 0.0f;
+            for (uint32_t i = 0; i < group_size; i++) mean += data[i];
+            mean *= inv_group_size;
+
+            float var = 0.0f;
+            for (uint32_t i = 0; i < group_size; i++) {
+                float diff = data[i] - mean;
+                var += diff * diff;
+            }
+            var *= inv_group_size;
+
+            float inv_std = 1.0f / sqrtf(var + layer->eps);
+            for (uint32_t c = 0; c < channels_per_group; c++) {
+                uint32_t global_channel = g * channels_per_group + c;
+                float w     = layer->weight->data[global_channel];
+                float b_val = layer->bias->data[global_channel];
+                for (uint32_t s = 0; s < spatial_size; s++) {
+                    uint32_t idx = c * spatial_size + s;
+                    out[idx] = (data[idx] - mean) * inv_std * w + b_val;
+                }
+            }
+#endif
+        }
+    }
+
+    return output;
+}
+
+void group_norm_free(GroupNormLayer* layer) {
+    tensor_release(layer->weight);
+    tensor_release(layer->bias);
+    free(layer);
+}
+
+// ============================================================
+// RMSNorm
+// ============================================================
+
+
+RMSNormLayer* rmsnorm_create(uint32_t normalized_shape, float eps) {
+    RMSNormLayer* layer = (RMSNormLayer*)calloc(1, sizeof(RMSNormLayer));
+    
+    layer->normalized_shape = normalized_shape;
+    layer->eps = eps;
+    
+    uint32_t shape[1] = {normalized_shape};
+    layer->weight = tensor_create(1, shape, true);
+    
+    tensor_fill(layer->weight, 1.0f);
+    
+    return layer;
+}
+
+Tensor* rmsnorm_forward(RMSNormLayer* layer, const Tensor* input) {
+    Tensor* output = tensor_create(input->dims, input->shape, input->requires_grad);
+    
+    uint32_t batch_size = input->size / layer->normalized_shape;
+    uint32_t norm_shape = layer->normalized_shape;
+    float inv_norm = 1.0f / norm_shape;
+    
+    #pragma omp parallel for
+    for (uint32_t b = 0; b < batch_size; b++) {
+        const float* data = &input->data[b * norm_shape];
+        float* out = &output->data[b * norm_shape];
+        const float* weight = layer->weight->data;
+        
+#if RPITORCH_HAS_NEON
+        // Vectorized mean square computation
+        float32x4_t vms = vdupq_n_f32(0.0f);
+        uint32_t i = 0;
+        for (; i + 4 <= norm_shape; i += 4) {
+            float32x4_t d = vld1q_f32(&data[i]);
+            vms = vfmaq_f32(vms, d, d);
+        }
+        float ms = vaddvq_f32(vms);
+        for (; i < norm_shape; i++) {
+            ms += data[i] * data[i];
+        }
+        ms *= inv_norm;
+        
+        // Fast reciprocal sqrt
+        float ms_eps = ms + layer->eps;
+        float32x4_t vms_eps = vdupq_n_f32(ms_eps);
+        float32x4_t est = vrsqrteq_f32(vms_eps);
+        est = vmulq_f32(est, vrsqrtsq_f32(vmulq_f32(vms_eps, est), est));
+        est = vmulq_f32(est, vrsqrtsq_f32(vmulq_f32(vms_eps, est), est));
+        float inv_rms = vgetq_lane_f32(est, 0);
+        float32x4_t vinv_rms = vdupq_n_f32(inv_rms);
+        
+        // 8-wide normalization
+        for (i = 0; i + 8 <= norm_shape; i += 8) {
+            float32x4_t d0 = vld1q_f32(&data[i]);
+            float32x4_t d1 = vld1q_f32(&data[i+4]);
+            float32x4_t n0 = vmulq_f32(d0, vinv_rms);
+            float32x4_t n1 = vmulq_f32(d1, vinv_rms);
+            float32x4_t w0 = vld1q_f32(&weight[i]);
+            float32x4_t w1 = vld1q_f32(&weight[i+4]);
+            vst1q_f32(&out[i], vmulq_f32(n0, w0));
+            vst1q_f32(&out[i+4], vmulq_f32(n1, w1));
+        }
+        // Tail
+        for (; i + 4 <= norm_shape; i += 4) {
+            float32x4_t d = vld1q_f32(&data[i]);
+            float32x4_t norm = vmulq_f32(d, vinv_rms);
+            float32x4_t w = vld1q_f32(&weight[i]);
+            vst1q_f32(&out[i], vmulq_f32(norm, w));
+        }
+        for (; i < norm_shape; i++) {
+            out[i] = data[i] * inv_rms * weight[i];
+        }
+#else
+        // Scalar fallback
+        float ms = 0.0f;
+        for (uint32_t i = 0; i < norm_shape; i++) {
+            ms += data[i] * data[i];
+        }
+        ms *= inv_norm;
+        
+        float inv_rms = 1.0f / sqrtf(ms + layer->eps);
+        for (uint32_t i = 0; i < norm_shape; i++) {
+            out[i] = data[i] * inv_rms * weight[i];
+        }
+#endif
+    }
+    
+    return output;
+}
+
+void rmsnorm_free(RMSNormLayer* layer) {
+    tensor_release(layer->weight);
     free(layer);
 }
 
@@ -480,12 +783,13 @@ EmbeddingLayer* embedding_create(uint32_t num_embeddings, uint32_t embedding_dim
     return layer;
 }
 
-Tensor* embedding_forward(EmbeddingLayer* layer, const uint32_t* indices, uint32_t num_indices) {
+Tensor* embedding_forward(EmbeddingLayer* layer, const Tensor* indices) {
+    uint32_t num_indices = indices->size;
     uint32_t output_shape[2] = {num_indices, layer->embedding_dim};
-    Tensor* output = tensor_create(2, output_shape, true);
+    Tensor* output = tensor_create(2, output_shape, layer->weight->requires_grad);
     
     for (uint32_t i = 0; i < num_indices; i++) {
-        uint32_t idx = indices[i];
+        uint32_t idx = (uint32_t)indices->data[i];
         if (idx < layer->num_embeddings) {
             memcpy(&output->data[i * layer->embedding_dim],
                   &layer->weight->data[idx * layer->embedding_dim],
@@ -493,11 +797,24 @@ Tensor* embedding_forward(EmbeddingLayer* layer, const uint32_t* indices, uint32
         }
     }
     
+    if (rpl_is_grad_enabled() && layer->weight->requires_grad) {
+        output->requires_grad = true;
+        output->is_leaf = false;
+        output->_op = OP_EMBEDDING;
+        output->_parents[0] = layer->weight;
+        output->_parents[1] = (Tensor*)indices;
+        output->_n_parents = 2;
+        tensor_retain(layer->weight);
+        tensor_retain((Tensor*)indices);
+    } else {
+        output->requires_grad = false;
+    }
+    
     return output;
 }
 
 void embedding_free(EmbeddingLayer* layer) {
-    tensor_free(layer->weight);
+    tensor_release(layer->weight);
     free(layer);
 }
 
@@ -520,6 +837,21 @@ DropoutLayer* dropout_create(float p) {
 Tensor* dropout_forward(DropoutLayer* layer, const Tensor* input) {
     Tensor* output = tensor_create(input->dims, input->shape, input->requires_grad);
     tensor_dropout(output, input, layer->p, layer->training);
+    
+    if (rpl_is_grad_enabled() && input->requires_grad && layer->training) {
+        output->requires_grad = true;
+        output->is_leaf = false;
+        output->_op = OP_DROPOUT;
+        output->_parents[0] = (Tensor*)input;
+        output->_parents[1] = NULL;
+        output->_parents[2] = NULL;
+        output->_n_parents = 1;
+        output->_saved_scalar = layer->p;
+        tensor_retain((Tensor*)input);
+    } else {
+        output->requires_grad = false;
+    }
+    
     return output;
 }
 
@@ -579,6 +911,20 @@ Tensor* maxpool2d_forward(MaxPool2dLayer* layer, const Tensor* input) {
                 }
             }
         }
+    }
+    if (rpl_is_grad_enabled() && input->requires_grad) {
+        output->requires_grad = true;
+        output->is_leaf = false;
+        output->_op = OP_MAXPOOL2D;
+        output->_parents[0] = (Tensor*)input;
+        output->_parents[1] = NULL;
+        output->_parents[2] = NULL;
+        output->_n_parents = 1;
+        uint32_t encoded = (layer->kernel_size & 0xFFFF) | ((layer->stride & 0xFFFF) << 16);
+        output->_saved_scalar = (float)encoded;
+        tensor_retain((Tensor*)input);
+    } else {
+        output->requires_grad = false;
     }
     
     return output;

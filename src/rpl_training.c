@@ -11,6 +11,10 @@
 #include <stdio.h>
 #include <time.h>
 
+#if RPITORCH_HAS_NEON
+#include <arm_neon.h>
+#endif
+
 // ============================================================
 // Optimizer Base Structure
 // ============================================================
@@ -169,36 +173,77 @@ void optimizer_adam_step(Optimizer* opt) {
         Tensor* param = opt->parameters[p];
         if (!param->grad) continue;
         
+        float* data = param->data;
         float* grad = param->grad;
-        Tensor* m = state->m[p];
-        Tensor* v = state->v[p];
-        
-        // Weight decay
-        if (opt->weight_decay != 0.0f) {
-            #pragma omp simd
-            for (uint32_t i = 0; i < param->size; i++) {
-                grad[i] += opt->weight_decay * param->data[i];
+        float* m_data = state->m[p]->data;
+        float* v_data = state->v[p]->data;
+        float beta1 = state->beta1;
+        float beta2 = state->beta2;
+        float one_minus_beta1 = 1.0f - beta1;
+        float one_minus_beta2 = 1.0f - beta2;
+        float eps = state->epsilon;
+        float wd = opt->weight_decay;
+
+#if RPITORCH_HAS_NEON
+        float32x4_t vbeta1 = vdupq_n_f32(beta1);
+        float32x4_t vone_minus_beta1 = vdupq_n_f32(one_minus_beta1);
+        float32x4_t vbeta2 = vdupq_n_f32(beta2);
+        float32x4_t vone_minus_beta2 = vdupq_n_f32(one_minus_beta2);
+        float32x4_t veps = vdupq_n_f32(eps);
+        float32x4_t vstep = vdupq_n_f32(step_size);
+        float32x4_t vwd = vdupq_n_f32(wd);
+
+        uint32_t i = 0;
+        const uint32_t neon_end = (param->size / 4) * 4;
+        #pragma omp simd
+        for (i = 0; i < neon_end; i += 4) {
+            float32x4_t vg = vld1q_f32(&grad[i]);
+            float32x4_t vd = vld1q_f32(&data[i]);
+            float32x4_t vm = vld1q_f32(&m_data[i]);
+            float32x4_t vv = vld1q_f32(&v_data[i]);
+
+            if (wd != 0.0f) {
+                vg = vmlaq_f32(vg, vwd, vd);
             }
+
+            vm = vmlaq_f32(vmulq_f32(vone_minus_beta1, vg), vbeta1, vm);
+            vv = vmlaq_f32(vmulq_f32(vone_minus_beta2, vmulq_f32(vg, vg)), vbeta2, vv);
+
+            vst1q_f32(&m_data[i], vm);
+            vst1q_f32(&v_data[i], vv);
+
+            float32x4_t vsqrt = vsqrtq_f32(vv);
+            float32x4_t vdenom = vaddq_f32(vsqrt, veps);
+            float32x4_t vstep_m = vmulq_f32(vstep, vm);
+            float32x4_t vupdate = vdivq_f32(vstep_m, vdenom);
+            vd = vsubq_f32(vd, vupdate);
+            vst1q_f32(&data[i], vd);
         }
-        
-        // Update biased first moment estimate
+        for (; i < param->size; i++) {
+            float g = grad[i];
+            if (wd != 0.0f) {
+                g += wd * data[i];
+            }
+            float m_val = beta1 * m_data[i] + one_minus_beta1 * g;
+            float v_val = beta2 * v_data[i] + one_minus_beta2 * g * g;
+            m_data[i] = m_val;
+            v_data[i] = v_val;
+            data[i] -= step_size * m_val / (sqrtf(v_val) + eps);
+        }
+#else
         #pragma omp simd
         for (uint32_t i = 0; i < param->size; i++) {
-            m->data[i] = state->beta1 * m->data[i] + (1.0f - state->beta1) * grad[i];
+            float g = grad[i];
+            if (wd != 0.0f) {
+                g += wd * data[i];
+            }
+            float m_val = beta1 * m_data[i] + one_minus_beta1 * g;
+            float v_val = beta2 * v_data[i] + one_minus_beta2 * g * g;
+            m_data[i] = m_val;
+            v_data[i] = v_val;
+            data[i] -= step_size * m_val / (sqrtf(v_val) + eps);
         }
-        
-        // Update biased second raw moment estimate
-        #pragma omp simd
-        for (uint32_t i = 0; i < param->size; i++) {
-            v->data[i] = state->beta2 * v->data[i] + 
-                        (1.0f - state->beta2) * grad[i] * grad[i];
-        }
-        
-        // Update parameters
-        #pragma omp simd
-        for (uint32_t i = 0; i < param->size; i++) {
-            param->data[i] -= step_size * m->data[i] / (sqrtf(v->data[i]) + state->epsilon);
-        }
+#endif
     }
 }
 
@@ -369,6 +414,7 @@ struct LAMBState {
     uint64_t step;
     Tensor** m;  // First moment
     Tensor** v;  // Second moment
+    float** adam_step; // Pre-allocated step buffers
 };
 
 Optimizer* optimizer_lamb_create(Tensor** parameters, uint32_t num_params,
@@ -389,12 +435,14 @@ Optimizer* optimizer_lamb_create(Tensor** parameters, uint32_t num_params,
     
     state->m = (Tensor**)calloc(num_params, sizeof(Tensor*));
     state->v = (Tensor**)calloc(num_params, sizeof(Tensor*));
+    state->adam_step = (float**)calloc(num_params, sizeof(float*));
     
     for (uint32_t i = 0; i < num_params; i++) {
         state->m[i] = tensor_create(parameters[i]->dims, parameters[i]->shape, false);
         state->v[i] = tensor_create(parameters[i]->dims, parameters[i]->shape, false);
         tensor_fill(state->m[i], 0.0f);
         tensor_fill(state->v[i], 0.0f);
+        state->adam_step[i] = (float*)malloc(parameters[i]->size * sizeof(float));
     }
     
     opt->state = state;
@@ -413,42 +461,93 @@ void optimizer_lamb_step(Optimizer* opt) {
         Tensor* param = opt->parameters[p];
         if (!param->grad) continue;
         
+        float* data = param->data;
         float* grad = param->grad;
-        Tensor* m = state->m[p];
-        Tensor* v = state->v[p];
-        
-        // Update biased first moment estimate
+        float* m_data = state->m[p]->data;
+        float* v_data = state->v[p]->data;
+        float* adam_step = state->adam_step[p];
+        float beta1 = state->beta1;
+        float beta2 = state->beta2;
+        float one_minus_beta1 = 1.0f - beta1;
+        float one_minus_beta2 = 1.0f - beta2;
+        float eps = state->epsilon;
+        float wd = opt->weight_decay;
+
+#if RPITORCH_HAS_NEON
+        float32x4_t vbeta1 = vdupq_n_f32(beta1);
+        float32x4_t vone_minus_beta1 = vdupq_n_f32(one_minus_beta1);
+        float32x4_t vbeta2 = vdupq_n_f32(beta2);
+        float32x4_t vone_minus_beta2 = vdupq_n_f32(one_minus_beta2);
+        float32x4_t veps = vdupq_n_f32(eps);
+        float32x4_t vbc1 = vdupq_n_f32(bias_correction1);
+        float32x4_t vbc2 = vdupq_n_f32(bias_correction2);
+        float32x4_t vwd = vdupq_n_f32(wd);
+
+        uint32_t i = 0;
+        const uint32_t neon_end = (param->size / 4) * 4;
         #pragma omp simd
-        for (uint32_t i = 0; i < param->size; i++) {
-            m->data[i] = state->beta1 * m->data[i] + (1.0f - state->beta1) * grad[i];
-        }
-        
-        // Update biased second raw moment estimate
-        #pragma omp simd
-        for (uint32_t i = 0; i < param->size; i++) {
-            v->data[i] = state->beta2 * v->data[i] + 
-                        (1.0f - state->beta2) * grad[i] * grad[i];
-        }
-        
-        // Compute Adam step
-        float* adam_step = (float*)malloc(param->size * sizeof(float));
-        
-        #pragma omp simd
-        for (uint32_t i = 0; i < param->size; i++) {
-            float m_hat = m->data[i] / bias_correction1;
-            float v_hat = v->data[i] / bias_correction2;
-            adam_step[i] = m_hat / (sqrtf(v_hat) + state->epsilon);
-            
-            if (opt->weight_decay != 0.0f) {
-                adam_step[i] += opt->weight_decay * param->data[i];
+        for (i = 0; i < neon_end; i += 4) {
+            float32x4_t vg = vld1q_f32(&grad[i]);
+            float32x4_t vd = vld1q_f32(&data[i]);
+            float32x4_t vm = vld1q_f32(&m_data[i]);
+            float32x4_t vv = vld1q_f32(&v_data[i]);
+
+            vm = vmlaq_f32(vmulq_f32(vone_minus_beta1, vg), vbeta1, vm);
+            vv = vmlaq_f32(vmulq_f32(vone_minus_beta2, vmulq_f32(vg, vg)), vbeta2, vv);
+
+            vst1q_f32(&m_data[i], vm);
+            vst1q_f32(&v_data[i], vv);
+
+            float32x4_t vm_hat = vdivq_f32(vm, vbc1);
+            float32x4_t vv_hat = vdivq_f32(vv, vbc2);
+
+            float32x4_t vsqrt = vsqrtq_f32(vv_hat);
+            float32x4_t vdenom = vaddq_f32(vsqrt, veps);
+            float32x4_t vstep = vdivq_f32(vm_hat, vdenom);
+
+            if (wd != 0.0f) {
+                vstep = vmlaq_f32(vstep, vwd, vd);
             }
+            vst1q_f32(&adam_step[i], vstep);
         }
-        
+        for (; i < param->size; i++) {
+            float g = grad[i];
+            float m_val = beta1 * m_data[i] + one_minus_beta1 * g;
+            float v_val = beta2 * v_data[i] + one_minus_beta2 * g * g;
+            m_data[i] = m_val;
+            v_data[i] = v_val;
+            float m_hat = m_val / bias_correction1;
+            float v_hat = v_val / bias_correction2;
+            float step = m_hat / (sqrtf(v_hat) + eps);
+            if (wd != 0.0f) {
+                step += wd * data[i];
+            }
+            adam_step[i] = step;
+        }
+#else
+        #pragma omp simd
+        for (uint32_t i = 0; i < param->size; i++) {
+            float g = grad[i];
+            float m_val = beta1 * m_data[i] + one_minus_beta1 * g;
+            float v_val = beta2 * v_data[i] + one_minus_beta2 * g * g;
+            m_data[i] = m_val;
+            v_data[i] = v_val;
+            float m_hat = m_val / bias_correction1;
+            float v_hat = v_val / bias_correction2;
+            float step = m_hat / (sqrtf(v_hat) + eps);
+            if (wd != 0.0f) {
+                step += wd * data[i];
+            }
+            adam_step[i] = step;
+        }
+#endif
+
         // Compute layer-wise trust ratio
         float param_norm = 0.0f, update_norm = 0.0f;
         
+        #pragma omp simd reduction(+:param_norm, update_norm)
         for (uint32_t i = 0; i < param->size; i++) {
-            param_norm += param->data[i] * param->data[i];
+            param_norm += data[i] * data[i];
             update_norm += adam_step[i] * adam_step[i];
         }
         
@@ -461,12 +560,28 @@ void optimizer_lamb_step(Optimizer* opt) {
         }
         
         // Update parameters with trust ratio
+#if RPITORCH_HAS_NEON
+        float lr_tr = opt->learning_rate * trust_ratio;
+        float32x4_t vlr_tr = vdupq_n_f32(lr_tr);
+        i = 0;
+        const uint32_t neon_end2 = (param->size / 4) * 4;
+        #pragma omp simd
+        for (i = 0; i < neon_end2; i += 4) {
+            float32x4_t vd = vld1q_f32(&data[i]);
+            float32x4_t vu = vld1q_f32(&adam_step[i]);
+            vd = vmlsq_f32(vd, vlr_tr, vu);
+            vst1q_f32(&data[i], vd);
+        }
+        for (; i < param->size; i++) {
+            data[i] -= lr_tr * adam_step[i];
+        }
+#else
+        float lr_tr = opt->learning_rate * trust_ratio;
         #pragma omp simd
         for (uint32_t i = 0; i < param->size; i++) {
-            param->data[i] -= opt->learning_rate * trust_ratio * adam_step[i];
+            data[i] -= lr_tr * adam_step[i];
         }
-        
-        free(adam_step);
+#endif
     }
 }
 
@@ -497,30 +612,69 @@ void optimizer_adamw_step(Optimizer* opt) {
         Tensor* param = opt->parameters[p];
         if (!param->grad) continue;
         
+        float* data = param->data;
         float* grad = param->grad;
-        Tensor* m = state->m[p];
-        Tensor* v = state->v[p];
-        
-        // Update biased first moment estimate (NO weight decay in gradient)
+        float* m_data = state->m[p]->data;
+        float* v_data = state->v[p]->data;
+        float beta1 = state->beta1;
+        float beta2 = state->beta2;
+        float one_minus_beta1 = 1.0f - beta1;
+        float one_minus_beta2 = 1.0f - beta2;
+        float eps = state->epsilon;
+        float decay = 1.0f - opt->learning_rate * opt->weight_decay;
+
+#if RPITORCH_HAS_NEON
+        float32x4_t vbeta1 = vdupq_n_f32(beta1);
+        float32x4_t vone_minus_beta1 = vdupq_n_f32(one_minus_beta1);
+        float32x4_t vbeta2 = vdupq_n_f32(beta2);
+        float32x4_t vone_minus_beta2 = vdupq_n_f32(one_minus_beta2);
+        float32x4_t veps = vdupq_n_f32(eps);
+        float32x4_t vstep = vdupq_n_f32(step_size);
+        float32x4_t vdecay = vdupq_n_f32(decay);
+
+        uint32_t i = 0;
+        const uint32_t neon_end = (param->size / 4) * 4;
+        #pragma omp simd
+        for (i = 0; i < neon_end; i += 4) {
+            float32x4_t vg = vld1q_f32(&grad[i]);
+            float32x4_t vd = vld1q_f32(&data[i]);
+            float32x4_t vm = vld1q_f32(&m_data[i]);
+            float32x4_t vv = vld1q_f32(&v_data[i]);
+
+            vm = vmlaq_f32(vmulq_f32(vone_minus_beta1, vg), vbeta1, vm);
+            vv = vmlaq_f32(vmulq_f32(vone_minus_beta2, vmulq_f32(vg, vg)), vbeta2, vv);
+
+            vst1q_f32(&m_data[i], vm);
+            vst1q_f32(&v_data[i], vv);
+
+            float32x4_t vsqrt = vsqrtq_f32(vv);
+            float32x4_t vdenom = vaddq_f32(vsqrt, veps);
+            float32x4_t vstep_m = vmulq_f32(vstep, vm);
+            float32x4_t vupdate = vdivq_f32(vstep_m, vdenom);
+            
+            vd = vmulq_f32(vd, vdecay);
+            vd = vsubq_f32(vd, vupdate);
+            vst1q_f32(&data[i], vd);
+        }
+        for (; i < param->size; i++) {
+            float g = grad[i];
+            float m_val = beta1 * m_data[i] + one_minus_beta1 * g;
+            float v_val = beta2 * v_data[i] + one_minus_beta2 * g * g;
+            m_data[i] = m_val;
+            v_data[i] = v_val;
+            data[i] = data[i] * decay - step_size * m_val / (sqrtf(v_val) + eps);
+        }
+#else
         #pragma omp simd
         for (uint32_t i = 0; i < param->size; i++) {
-            m->data[i] = state->beta1 * m->data[i] + (1.0f - state->beta1) * grad[i];
+            float g = grad[i];
+            float m_val = beta1 * m_data[i] + one_minus_beta1 * g;
+            float v_val = beta2 * v_data[i] + one_minus_beta2 * g * g;
+            m_data[i] = m_val;
+            v_data[i] = v_val;
+            data[i] = data[i] * decay - step_size * m_val / (sqrtf(v_val) + eps);
         }
-        
-        // Update biased second raw moment estimate
-        #pragma omp simd
-        for (uint32_t i = 0; i < param->size; i++) {
-            v->data[i] = state->beta2 * v->data[i] + 
-                        (1.0f - state->beta2) * grad[i] * grad[i];
-        }
-        
-        // Update parameters with DECOUPLED weight decay
-        #pragma omp simd
-        for (uint32_t i = 0; i < param->size; i++) {
-            // AdamW: weight decay applied directly to parameters, not gradients
-            param->data[i] = param->data[i] * (1.0f - opt->learning_rate * opt->weight_decay) -
-                            step_size * m->data[i] / (sqrtf(v->data[i]) + state->epsilon);
-        }
+#endif
     }
 }
 
@@ -550,6 +704,12 @@ void optimizer_step(Optimizer* opt) {
 void optimizer_zero_grad(Optimizer* opt) {
     for (uint32_t i = 0; i < opt->num_params; i++) {
         tensor_zero_grad(opt->parameters[i]);
+    }
+}
+
+void optimizer_zero_grad_set_to_none(Optimizer* opt) {
+    for (uint32_t i = 0; i < opt->num_params; i++) {
+        tensor_free_grad(opt->parameters[i]);
     }
 }
 
@@ -597,9 +757,11 @@ void optimizer_free(Optimizer* opt) {
         for (uint32_t i = 0; i < opt->num_params; i++) {
             tensor_free(state->m[i]);
             tensor_free(state->v[i]);
+            if (state->adam_step[i]) free(state->adam_step[i]);
         }
         free(state->m);
         free(state->v);
+        free(state->adam_step);
         free(state);
     }
     

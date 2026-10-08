@@ -1,5 +1,6 @@
 import ctypes
 import os
+import sys
 import numpy as np
 
 # Load the shared library
@@ -26,6 +27,13 @@ class RTensor(ctypes.Structure):
         ("device", ctypes.c_int32),
         ("gpu_buffer", ctypes.c_uint32),
         ("is_leaf", ctypes.c_bool),
+        ("_visited", ctypes.c_bool),
+        ("_refcount", ctypes.c_int32),
+        ("_op", ctypes.c_int32),
+        ("_parents", ctypes.c_void_p * 3),
+        ("_n_parents", ctypes.c_uint8),
+        ("_saved_scalar", ctypes.c_float),
+        ("_grad_refcount", ctypes.c_uint32),
         ("parent1", ctypes.c_void_p),
         ("parent2", ctypes.c_void_p),
         ("backward_fn", ctypes.c_void_p),
@@ -64,6 +72,12 @@ _sig("tensor_mul_inplace", [_PTR, _F], None)
 _sig("tensor_randomize", [_PTR], None)
 _sig("tensor_backward", [_PTR], None)
 _sig("tensor_zero_grad", [_PTR], None)
+_sig("tensor_free_grad", [_PTR], None)
+_sig("tensor_retain", [_PTR], None)
+_sig("tensor_release", [_PTR], None)
+_sig("rpl_set_grad_enabled", [_BOOL], None)
+_sig("rpl_is_grad_enabled", [], _BOOL)
+_sig("rpl_empty_cache", [], None)
 
 # Activations returning new tensor
 _sig("tensor_relu", [_PTR], _PTR)
@@ -188,6 +202,8 @@ _sig("tensor_narrow", [_PTR, _I32, _U32, _U32], _PTR)
 _sig("tensor_index_select", [_PTR, _I32, ctypes.POINTER(_U32), _U32], _PTR)
 _sig("tensor_where_cond", [_PTR, _PTR, _PTR], _PTR)
 _sig("tensor_tile", [_PTR, ctypes.POINTER(_U32), _U32], _PTR)
+_sig("tensor_transpose", [_PTR, _I32, _I32], _PTR)
+_sig("tensor_permute", [_PTR, ctypes.POINTER(_U32)], _PTR)
 
 # FFT
 _sig("tensor_fft", [_PTR], _PTR)
@@ -219,11 +235,6 @@ _sig("tensor_trapezoid", [_PTR, _F], _F)
 
 # Missing math
 _sig("tensor_nan_to_num", [_PTR, _F, _F, _F], _PTR)
-_sig("tensor_lerp", [_PTR, _PTR, _F], _PTR)
-_sig("tensor_addcmul", [_PTR, _PTR, _PTR, _F], _PTR)
-_sig("tensor_addcdiv", [_PTR, _PTR, _PTR, _F], _PTR)
-_sig("tensor_div", [_PTR, _PTR], _PTR)
-_sig("tensor_sub", [_PTR, _PTR], _PTR)
 
 # Missing reduce
 _sig("tensor_prod_all", [_PTR], _F)
@@ -270,10 +281,19 @@ except AttributeError:
 # ============================================================
 
 class Tensor:
-    def __init__(self, data=None, shape=None, requires_grad=False, _ptr=None):
+    # Class-level set to prevent GC of tensors still in autograd graphs
+    _prevent_gc = set()
+
+    def __init__(self, data=None, shape=None, requires_grad=False, _ptr=None, _borrow=False):
         if _ptr:
-            self._ptr = _ptr
-            self._owns_ptr = False
+            if hasattr(_ptr, "contents"):
+                raw_addr = ctypes.cast(_ptr, ctypes.c_void_p).value
+                self._ptr = ctypes.cast(raw_addr, ctypes.POINTER(RTensor)) if raw_addr else _ptr
+            else:
+                self._ptr = _ptr
+            if _borrow:
+                _lib.tensor_retain(self._ptr)
+            self._owns_ptr = True
         elif data is not None:
             data = np.array(data, dtype=np.float32)
             c_shape = (ctypes.c_uint32 * len(data.shape))(*data.shape)
@@ -290,10 +310,20 @@ class Tensor:
             raise ValueError("Must provide data, shape, or _ptr")
 
     def __del__(self):
-        if getattr(self, "_owns_ptr", False) and self._ptr:
+        try:
+            if sys is None or sys.is_finalizing() or _lib is None:
+                return
+        except:
+            return
+        ptr = getattr(self, "_ptr", None)
+        if getattr(self, "_owns_ptr", False) and ptr:
+            self._ptr = None  # Prevent double-release
+            self._owns_ptr = False
+            Tensor._prevent_gc.discard(self)
             try:
-                _lib.tensor_free(self._ptr)
-                self._ptr = None
+                raw_val = ctypes.cast(ptr, ctypes.c_void_p).value
+                if raw_val is not None and raw_val > 0x10000:
+                    _lib.tensor_release(ptr)
             except:
                 pass
 
@@ -301,6 +331,8 @@ class Tensor:
         """Create a new tensor with the same shape."""
         c_shape = (ctypes.c_uint32 * self._ptr.contents.dims)(*self.shape)
         ptr = _lib.tensor_create(self._ptr.contents.dims, c_shape, False)
+        if self.device == 1 and hasattr(_lib, 'tensor_to_gpu'):
+            _lib.tensor_to_gpu(ptr)
         return ptr
 
     @property
@@ -339,8 +371,11 @@ class Tensor:
     def backward(self):
         _lib.tensor_backward(self._ptr)
 
-    def zero_grad(self):
-        _lib.tensor_zero_grad(self._ptr)
+    def zero_grad(self, set_to_none=False):
+        if set_to_none:
+            _lib.tensor_free_grad(self._ptr)
+        else:
+            _lib.tensor_zero_grad(self._ptr)
 
     # --- Device ---
     def to_gpu(self):
@@ -355,27 +390,50 @@ class Tensor:
 
     # --- Arithmetic ---
     def __add__(self, other):
-        if not isinstance(other, Tensor):
-            raise TypeError("Only Tensor additions supported")
-        out_ptr = _lib.tensor_add(self._ptr, other._ptr)
-        return Tensor(_ptr=out_ptr)
+        if isinstance(other, Tensor):
+            out_ptr = _lib.tensor_add(self._ptr, other._ptr)
+            return Tensor(_ptr=out_ptr)
+        elif isinstance(other, (int, float)):
+            other_t = zeros(*self.shape)
+            other_t.fill_(float(other))
+            out_ptr = _lib.tensor_add(self._ptr, other_t._ptr)
+            return Tensor(_ptr=out_ptr)
+        raise TypeError("Unsupported operand type")
+
+    def __radd__(self, other):
+        return self.__add__(other)
 
     def __sub__(self, other):
-        if not isinstance(other, Tensor):
-            raise TypeError("Only Tensor subtractions supported")
-        out_ptr = _lib.tensor_sub(self._ptr, other._ptr)
-        return Tensor(_ptr=out_ptr)
+        if isinstance(other, Tensor):
+            out_ptr = _lib.tensor_sub(self._ptr, other._ptr)
+            return Tensor(_ptr=out_ptr)
+        elif isinstance(other, (int, float)):
+            other_t = zeros(*self.shape)
+            other_t.fill_(float(other))
+            out_ptr = _lib.tensor_sub(self._ptr, other_t._ptr)
+            return Tensor(_ptr=out_ptr)
+        raise TypeError("Unsupported operand type")
+
+    def __rsub__(self, other):
+        if isinstance(other, (int, float)):
+            other_t = zeros(*self.shape)
+            other_t.fill_(float(other))
+            out_ptr = _lib.tensor_sub(other_t._ptr, self._ptr)
+            return Tensor(_ptr=out_ptr)
+        raise TypeError("Unsupported operand type")
 
     def __mul__(self, other):
         if isinstance(other, Tensor):
             out_ptr = _lib.tensor_mul(self._ptr, other._ptr)
             return Tensor(_ptr=out_ptr)
         elif isinstance(other, (int, float)):
-            # scalar mul via inplace on clone
             out = self.clone()
             _lib.tensor_mul_inplace(out._ptr, float(other))
             return out
         raise TypeError("Unsupported operand type")
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
 
     def __matmul__(self, other):
         if not isinstance(other, Tensor):
@@ -393,16 +451,33 @@ class Tensor:
 
     # --- Clone ---
     def clone(self):
-        t = Tensor(shape=self.shape)
-        t._owns_ptr = True
-        ctypes.memmove(t._ptr.contents.data, self._ptr.contents.data,
-                       self.size * ctypes.sizeof(ctypes.c_float))
-        return t
+        out_ptr = _lib.tensor_clone(self._ptr)
+        return Tensor(_ptr=out_ptr)
 
     # --- Activations (return new tensor) ---
     def relu(self):
         out_ptr = _lib.tensor_relu(self._ptr)
         return Tensor(_ptr=out_ptr)
+
+    def relu_(self):
+        _lib.tensor_relu_inplace(self._ptr)
+        return self
+
+    def sigmoid_(self):
+        _lib.tensor_sigmoid_inplace(self._ptr)
+        return self
+
+    def tanh_(self):
+        _lib.tensor_tanh_inplace(self._ptr)
+        return self
+
+    def gelu_(self):
+        _lib.tensor_gelu_inplace(self._ptr)
+        return self
+
+    def softmax_(self):
+        _lib.tensor_softmax_inplace(self._ptr)
+        return self
 
     def sigmoid(self):
         out_ptr = _lib.tensor_sigmoid(self._ptr)
@@ -638,7 +713,18 @@ class Tensor:
     def reshape(self, *shape):
         if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
             shape = shape[0]
-        c_shape = (ctypes.c_uint32 * len(shape))(*shape)
+        shape = list(shape)
+        if -1 in shape:
+            neg_idx = shape.index(-1)
+            known_prod = 1
+            for i, d in enumerate(shape):
+                if i != neg_idx:
+                    known_prod *= d
+            if known_prod > 0:
+                shape[neg_idx] = self.size // known_prod
+            else:
+                shape[neg_idx] = 1
+        c_shape = (ctypes.c_uint32 * len(shape))(*[int(d) for d in shape])
         return Tensor(_ptr=_lib.tensor_reshape(self._ptr, len(shape), c_shape))
 
     def squeeze(self):
@@ -653,6 +739,15 @@ class Tensor:
     @property
     def T(self):
         return Tensor(_ptr=_lib.tensor_t_op(self._ptr))
+
+    def transpose(self, dim0, dim1):
+        return Tensor(_ptr=_lib.tensor_transpose(self._ptr, dim0, dim1))
+
+    def permute(self, *dims):
+        if len(dims) == 1 and isinstance(dims[0], (list, tuple)):
+            dims = dims[0]
+        c_dims = (ctypes.c_uint32 * len(dims))(*dims)
+        return Tensor(_ptr=_lib.tensor_permute(self._ptr, c_dims))
 
     def flip(self, dims):
         if isinstance(dims, int):
@@ -843,7 +938,25 @@ class Tensor:
     def __truediv__(self, other):
         if isinstance(other, Tensor):
             return Tensor(_ptr=_lib.tensor_div(self._ptr, other._ptr))
-        raise TypeError("Only Tensor divisions supported")
+        elif isinstance(other, (int, float)):
+            out = self.clone()
+            _lib.tensor_mul_inplace(out._ptr, 1.0 / float(other))
+            return out
+        raise TypeError("Unsupported operand type")
+
+    def __rtruediv__(self, other):
+        if isinstance(other, (int, float)):
+            val = zeros(*self.shape)
+            val.fill_(float(other))
+            return Tensor(_ptr=_lib.tensor_div(val._ptr, self._ptr))
+        raise TypeError("Unsupported operand type")
+
+    def detach(self):
+        return self.clone()
+
+    def requires_grad_(self, requires_grad=True):
+        self._ptr.contents.requires_grad = requires_grad
+        return self
 
 # ============================================================
 # Module-level factory functions
@@ -896,4 +1009,15 @@ def hann_window(size):
 
 def hamming_window(size):
     return Tensor(_ptr=_lib.tensor_hamming_window(size))
+
+def empty_cache():
+    _lib.rpl_empty_cache()
+
+
+class no_grad:
+    def __enter__(self):
+        self._prev = _lib.rpl_is_grad_enabled()
+        _lib.rpl_set_grad_enabled(False)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        _lib.rpl_set_grad_enabled(self._prev)
 

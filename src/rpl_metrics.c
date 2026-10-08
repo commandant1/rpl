@@ -262,6 +262,63 @@ void cross_validation_free(CrossValidationSplit* cv) {
 }
 
 // ============================================================
+// Robust Loss Functions
+// ============================================================
+
+float huber_loss(const Tensor* pred, const Tensor* target, float delta) {
+    if (pred->size != target->size) return 0.0f;
+    
+    float total_loss = 0.0f;
+    uint32_t n = pred->size;
+    
+    for (uint32_t i = 0; i < n; i++) {
+        float diff = fabsf(pred->data[i] - target->data[i]);
+        if (diff <= delta) {
+            total_loss += 0.5f * diff * diff;
+        } else {
+            total_loss += delta * (diff - 0.5f * delta);
+        }
+    }
+    
+    return total_loss / n;
+}
+
+float triplet_margin_loss(const Tensor* anchor, const Tensor* positive, const Tensor* negative, float margin) {
+    if (anchor->size != positive->size || anchor->size != negative->size) return 0.0f;
+    if (anchor->dims == 1 || (anchor->dims == 2 && anchor->shape[0] == 1)) {
+        // Single triplet
+        float pos_dist = 0.0f, neg_dist = 0.0f;
+        for (uint32_t i = 0; i < anchor->size; i++) {
+            float dp = anchor->data[i] - positive->data[i];
+            float dn = anchor->data[i] - negative->data[i];
+            pos_dist += dp * dp;
+            neg_dist += dn * dn;
+        }
+        float loss = pos_dist - neg_dist + margin;
+        return loss > 0.0f ? loss : 0.0f;
+    } else {
+        // Batched wrapper
+        uint32_t batch = anchor->shape[0];
+        uint32_t dim = anchor->size / batch;
+        float total_loss = 0.0f;
+        
+        for (uint32_t b = 0; b < batch; b++) {
+            float pos_dist = 0.0f, neg_dist = 0.0f;
+            for (uint32_t i = 0; i < dim; i++) {
+                uint32_t idx = b * dim + i;
+                float dp = anchor->data[idx] - positive->data[idx];
+                float dn = anchor->data[idx] - negative->data[idx];
+                pos_dist += dp * dp;
+                neg_dist += dn * dn;
+            }
+            float loss = pos_dist - neg_dist + margin;
+            if (loss > 0.0f) total_loss += loss;
+        }
+        return total_loss / batch;
+    }
+}
+
+// ============================================================
 // Grid Search for Hyperparameter Tuning
 // ============================================================
 

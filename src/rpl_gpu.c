@@ -263,7 +263,6 @@ void tensor_to_gpu(Tensor* t) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     t->device = DEVICE_GPU;
-    printf("RPL Debug: Tensor %p moved to GPU. Device field: %d\n", (void*)t, t->device);
 }
 
 // Download data from SSBO to CPU
@@ -325,12 +324,26 @@ static const char* BINARY_SHADER_SRC =
     "uniform uint size;\n"
     "uniform int op;\n" // 0: add, 1: sub, 2: mul, 3: div
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        if (op == 0) data_out[id] = data_a[id] + data_b[id];\n"
-    "        else if (op == 1) data_out[id] = data_a[id] - data_b[id];\n"
-    "        else if (op == 2) data_out[id] = data_a[id] * data_b[id];\n"
-    "        else if (op == 3) data_out[id] = data_a[id] / data_b[id];\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    if (id4 + 3u < size) {\n"
+    "        vec4 va = vec4(data_a[id4], data_a[id4+1u], data_a[id4+2u], data_a[id4+3u]);\n"
+    "        vec4 vb = vec4(data_b[id4], data_b[id4+1u], data_b[id4+2u], data_b[id4+3u]);\n"
+    "        vec4 vo;\n"
+    "        if (op == 0) vo = va + vb;\n"
+    "        else if (op == 1) vo = va - vb;\n"
+    "        else if (op == 2) vo = va * vb;\n"
+    "        else vo = va / vb;\n"
+    "        data_out[id4] = vo.x; data_out[id4+1u] = vo.y; data_out[id4+2u] = vo.z; data_out[id4+3u] = vo.w;\n"
+    "    } else {\n"
+    "        for (uint i = 0u; i < 4u; i++) {\n"
+    "            uint idx = id4 + i;\n"
+    "            if (idx < size) {\n"
+    "                if (op == 0) data_out[idx] = data_a[idx] + data_b[idx];\n"
+    "                else if (op == 1) data_out[idx] = data_a[idx] - data_b[idx];\n"
+    "                else if (op == 2) data_out[idx] = data_a[idx] * data_b[idx];\n"
+    "                else data_out[idx] = data_a[idx] / data_b[idx];\n"
+    "            }\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -359,7 +372,7 @@ void dispatch_binary_op(Tensor* out, const Tensor* a, const Tensor* b, int op) {
     glUniform1ui(glGetUniformLocation(binary_program, "size"), out->size);
     glUniform1i(glGetUniformLocation(binary_program, "op"), op);
 
-    GLuint num_groups = (out->size + 255) / 256;
+    GLuint num_groups = (out->size + 1023) / 1024;
     glDispatchCompute(num_groups, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
@@ -401,38 +414,49 @@ static const char* GEMM_SHADER_SRC =
     "uniform float beta;\n"
     "uniform int trans_a;\n"   /* 1 = read A^T */
     "uniform int trans_b;\n"   /* 1 = read B^T */
-    "shared float tileA[16][16];\n"
-    "shared float tileB[16][16];\n"
+    "shared float sA[32][16];\n"
+    "shared float sB[16][32];\n"
     "void main() {\n"
-    "    uint row = gl_GlobalInvocationID.y;\n"
-    "    uint col = gl_GlobalInvocationID.x;\n"
-    "    uint localRow = gl_LocalInvocationID.y;\n"
-    "    uint localCol = gl_LocalInvocationID.x;\n"
-    "    float sum = 0.0;\n"
-    "    for (uint t = 0u; t < (K + 15u) / 16u; t++) {\n"
-    "        uint tk = t * 16u;\n"
-    /* Load tileA: logical element A[row, tk+localCol] */
-    "        uint ak = tk + localCol;\n"
-    "        if (row < M && ak < K) {\n"
-    "            tileA[localRow][localCol] = (trans_a != 0)\n"
-    "                ? A[ak * M + row]\n"   /* A stored [K×M], read transposed */
-    "                : A[row * K + ak];\n"  /* A stored [M×K], normal */
-    "        } else { tileA[localRow][localCol] = 0.0; }\n"
-    /* Load tileB: logical element B[tk+localRow, col] */
-    "        uint bk = tk + localRow;\n"
-    "        if (col < N && bk < K) {\n"
-    "            tileB[localRow][localCol] = (trans_b != 0)\n"
-    "                ? B[col * K + bk]\n"   /* B stored [N×K], read transposed */
-    "                : B[bk * N + col];\n"  /* B stored [K×N], normal */
-    "        } else { tileB[localRow][localCol] = 0.0; }\n"
-    "        memoryBarrierShared();\n"
+    "    uint tid = (gl_LocalInvocationID.y << 4u) | gl_LocalInvocationID.x;\n"
+    "    uint brow = gl_WorkGroupID.y << 5u;\n"
+    "    uint bcol = gl_WorkGroupID.x << 5u;\n"
+    "    float c00 = 0.0, c01 = 0.0;\n"
+    "    float c10 = 0.0, c11 = 0.0;\n"
+    "    for (uint bk = 0u; bk < K; bk += 16u) {\n"
+    "        uint idxA0 = tid << 1u;\n"
+    "        uint idxA1 = idxA0 + 1u;\n"
+    "        uint rA0 = idxA0 >> 4u, kA0 = idxA0 & 15u;\n"
+    "        uint rA1 = idxA1 >> 4u, kA1 = idxA1 & 15u;\n"
+    "        uint grA0 = brow + rA0, gk0 = bk + kA0;\n"
+    "        uint grA1 = brow + rA1, gk1 = bk + kA1;\n"
+    "        sA[rA0][kA0] = (grA0 < M && gk0 < K) ? ((trans_a != 0) ? A[gk0 * M + grA0] : A[grA0 * K + gk0]) : 0.0;\n"
+    "        sA[rA1][kA1] = (grA1 < M && gk1 < K) ? ((trans_a != 0) ? A[gk1 * M + grA1] : A[grA1 * K + gk1]) : 0.0;\n"
+    "        uint kB0 = idxA0 >> 5u, cB0 = idxA0 & 31u;\n"
+    "        uint kB1 = idxA1 >> 5u, cB1 = idxA1 & 31u;\n"
+    "        uint gkB0 = bk + kB0, gcB0 = bcol + cB0;\n"
+    "        uint gkB1 = bk + kB1, gcB1 = bcol + cB1;\n"
+    "        sB[kB0][cB0] = (gkB0 < K && gcB0 < N) ? ((trans_b != 0) ? B[gcB0 * K + gkB0] : B[gkB0 * N + gcB0]) : 0.0;\n"
+    "        sB[kB1][cB1] = (gkB1 < K && gcB1 < N) ? ((trans_b != 0) ? B[gcB1 * K + gkB1] : B[gkB1 * N + gcB1]) : 0.0;\n"
     "        barrier();\n"
-    "        for (uint k = 0u; k < 16u; k++) { sum += tileA[localRow][k] * tileB[k][localCol]; }\n"
+    "        uint lr = gl_LocalInvocationID.y << 1u;\n"
+    "        uint lc = gl_LocalInvocationID.x << 1u;\n"
+    "        for (uint k = 0u; k < 16u; k++) {\n"
+    "            float a0 = sA[lr + 0u][k], a1 = sA[lr + 1u][k];\n"
+    "            float b0 = sB[k][lc + 0u], b1 = sB[k][lc + 1u];\n"
+    "            c00 += a0 * b0; c01 += a0 * b1;\n"
+    "            c10 += a1 * b0; c11 += a1 * b1;\n"
+    "        }\n"
     "        barrier();\n"
     "    }\n"
-    "    if (row < M && col < N) {\n"
-    "        uint idx = row * N + col;\n"
-    "        C[idx] = alpha * sum + beta * C[idx];\n"
+    "    uint gr = brow + (gl_LocalInvocationID.y << 1u);\n"
+    "    uint gc = bcol + (gl_LocalInvocationID.x << 1u);\n"
+    "    if (gr + 0u < M) {\n"
+    "        if (gc + 0u < N) { uint idx = (gr + 0u) * N + gc + 0u; C[idx] = alpha * c00 + beta * C[idx]; }\n"
+    "        if (gc + 1u < N) { uint idx = (gr + 0u) * N + gc + 1u; C[idx] = alpha * c01 + beta * C[idx]; }\n"
+    "    }\n"
+    "    if (gr + 1u < M) {\n"
+    "        if (gc + 0u < N) { uint idx = (gr + 1u) * N + gc + 0u; C[idx] = alpha * c10 + beta * C[idx]; }\n"
+    "        if (gc + 1u < N) { uint idx = (gr + 1u) * N + gc + 1u; C[idx] = alpha * c11 + beta * C[idx]; }\n"
     "    }\n"
     "}\n";
 
@@ -473,8 +497,8 @@ void tensor_gemm_gpu(Tensor* C, const Tensor* A, const Tensor* B,
     glUniform1i(glGetUniformLocation(gemm_program, "trans_a"), trans_a ? 1 : 0);
     glUniform1i(glGetUniformLocation(gemm_program, "trans_b"), trans_b ? 1 : 0);
 
-    GLuint groups_x = (N + 15) / 16;
-    GLuint groups_y = (M + 15) / 16;
+    GLuint groups_x = (N + 31) / 32;
+    GLuint groups_y = (M + 31) / 32;
     glDispatchCompute(groups_x, groups_y, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
@@ -503,10 +527,12 @@ static const char* RELU_SHADER_SRC =
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float val = in_data[id];\n"
-    "        out_data[id] = max(val, 0.0);\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            out_data[idx] = max(in_data[idx], 0.0);\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -517,10 +543,13 @@ static const char* SIGMOID_SHADER_SRC =
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float val = in_data[id];\n"
-    "        out_data[id] = 1.0 / (1.0 + exp(-val));\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float val = in_data[idx];\n"
+    "            out_data[idx] = 1.0 / (1.0 + exp(-val));\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -552,7 +581,7 @@ void dispatch_unary_op(Tensor* out, const Tensor* in, GLuint* program_ptr, const
 
     glUniform1ui(glGetUniformLocation(*program_ptr, "size"), out->size);
 
-    GLuint num_groups = (out->size + 255) / 256;
+    GLuint num_groups = (out->size + 1023) / 1024;
     glDispatchCompute(num_groups, 1, 1);
 
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
@@ -577,10 +606,12 @@ static const char* TANH_SHADER_SRC =
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float val = in_data[id];\n"
-    "        out_data[id] = tanh(val);\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            out_data[idx] = tanh(in_data[idx]);\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -591,15 +622,16 @@ static const char* GELU_SHADER_SRC =
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        // Approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))\n"
-    "        const float SQRT_2_OVER_PI = 0.7978845608;\n"
-    "        const float A = 0.044715;\n"
-    "        float inner = SQRT_2_OVER_PI * (x + A * x * x * x);\n"
-    "        float res = 0.5 * x * (1.0 + tanh(inner));\n"
-    "        out_data[id] = res;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            const float SQRT_2_OVER_PI = 0.7978845608;\n"
+    "            const float A = 0.044715;\n"
+    "            float inner = SQRT_2_OVER_PI * (x + A * x * x * x);\n"
+    "            out_data[idx] = 0.5 * x * (1.0 + tanh(inner));\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -626,10 +658,13 @@ static const char* LEAKY_RELU_SHADER_SRC =
     "uniform uint size;\n"
     "uniform float negative_slope;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        out_data[id] = (x >= 0.0) ? x : negative_slope * x;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            out_data[idx] = (x >= 0.0) ? x : negative_slope * x;\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -653,7 +688,7 @@ void tensor_leaky_relu_gpu(Tensor* out, const Tensor* in, float negative_slope) 
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, out->gpu_buffer);
     glUniform1ui(glGetUniformLocation(leaky_relu_program, "size"), out->size);
     glUniform1f(glGetUniformLocation(leaky_relu_program, "negative_slope"), negative_slope);
-    glDispatchCompute((out->size + 255) / 256, 1, 1);
+    glDispatchCompute((out->size + 1023) / 1024, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -669,10 +704,13 @@ static const char* ELU_SHADER_SRC =
     "uniform uint size;\n"
     "uniform float alpha;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        out_data[id] = (x >= 0.0) ? x : alpha * (exp(x) - 1.0);\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            out_data[idx] = (x >= 0.0) ? x : alpha * (exp(x) - 1.0);\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -696,7 +734,7 @@ void tensor_elu_gpu(Tensor* out, const Tensor* in, float alpha) {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, out->gpu_buffer);
     glUniform1ui(glGetUniformLocation(elu_program, "size"), out->size);
     glUniform1f(glGetUniformLocation(elu_program, "alpha"), alpha);
-    glDispatchCompute((out->size + 255) / 256, 1, 1);
+    glDispatchCompute((out->size + 1023) / 1024, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -711,11 +749,14 @@ static const char* SWISH_SHADER_SRC =
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        float sig = 1.0 / (1.0 + exp(-x));\n"
-    "        out_data[id] = x * sig;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            float sig = 1.0 / (1.0 + exp(-x));\n"
+    "            out_data[idx] = x * sig;\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -737,12 +778,15 @@ static const char* SELU_SHADER_SRC =
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        const float lam = 1.0507009873554804934;\n"
-    "        const float alp = 1.6732632423543772848;\n"
-    "        out_data[id] = (x >= 0.0) ? lam * x : lam * alp * (exp(x) - 1.0);\n"
+    "    const float lam = 1.0507009873554804934;\n"
+    "    const float alp = 1.6732632423543772848;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            out_data[idx] = (x >= 0.0) ? lam * x : lam * alp * (exp(x) - 1.0);\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -763,11 +807,14 @@ static const char* MISH_SHADER_SRC =
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        float sp = log(1.0 + exp(x));  // softplus\n"
-    "        out_data[id] = x * tanh(sp);\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            float sp = log(1.0 + exp(x));  // softplus\n"
+    "            out_data[idx] = x * tanh(sp);\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -788,11 +835,14 @@ static const char* HARDSWISH_SHADER_SRC =
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        float clip = clamp(x + 3.0, 0.0, 6.0);\n"
-    "        out_data[id] = x * clip / 6.0;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            float clip = clamp(x + 3.0, 0.0, 6.0);\n"
+    "            out_data[idx] = x * clip / 6.0;\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -813,10 +863,13 @@ static const char* HARDSIGMOID_SHADER_SRC =
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        out_data[id] = clamp(x / 6.0 + 0.5, 0.0, 1.0);\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            out_data[idx] = clamp(x / 6.0 + 0.5, 0.0, 1.0);\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -839,11 +892,14 @@ static const char* SOFTPLUS_SHADER_SRC =
     "uniform float beta;\n"
     "uniform float threshold;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        float bx = beta * x;\n"
-    "        out_data[id] = (bx > threshold) ? x : log(1.0 + exp(bx)) / beta;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            float bx = beta * x;\n"
+    "            out_data[idx] = (bx > threshold) ? x : log(1.0 + exp(bx)) / beta;\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -868,7 +924,7 @@ void tensor_softplus_gpu(Tensor* out, const Tensor* in, float beta, float thresh
     glUniform1ui(glGetUniformLocation(softplus_program, "size"), out->size);
     glUniform1f(glGetUniformLocation(softplus_program, "beta"), beta);
     glUniform1f(glGetUniformLocation(softplus_program, "threshold"), threshold);
-    glDispatchCompute((out->size + 255) / 256, 1, 1);
+    glDispatchCompute((out->size + 1023) / 1024, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -878,7 +934,7 @@ void tensor_softplus_gpu(Tensor* out, const Tensor* in, float beta, float thresh
 
 static const char* LOG_SOFTMAX_SHADER_SRC =
     "#version 310 es\n"
-    "layout(local_size_x = 1) in;\n"           /* one invocation per row */
+    "layout(local_size_x = 32) in;\n"           /* 32 rows per workgroup */
     "layout(std430, binding = 0) readonly buffer Input { float in_data[]; };\n"
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint num_rows;\n"
@@ -903,7 +959,7 @@ static const char* LOG_SOFTMAX_SHADER_SRC =
 // Softmax (output = exp(x)/sum(exp(x))) — same structure
 static const char* SOFTMAX_SHADER_SRC =
     "#version 310 es\n"
-    "layout(local_size_x = 1) in;\n"
+    "layout(local_size_x = 32) in;\n"
     "layout(std430, binding = 0) readonly buffer Input { float in_data[]; };\n"
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint num_rows;\n"
@@ -947,7 +1003,7 @@ void tensor_softmax_gpu(Tensor* out, const Tensor* in, uint32_t axis) {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, out->gpu_buffer);
     glUniform1ui(glGetUniformLocation(softmax_program, "num_rows"), num_rows);
     glUniform1ui(glGetUniformLocation(softmax_program, "row_size"), row_size);
-    glDispatchCompute(num_rows, 1, 1);
+    glDispatchCompute((num_rows + 31) / 32, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -971,7 +1027,7 @@ void tensor_log_softmax_gpu(Tensor* out, const Tensor* in) {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, out->gpu_buffer);
     glUniform1ui(glGetUniformLocation(log_softmax_program, "num_rows"), num_rows);
     glUniform1ui(glGetUniformLocation(log_softmax_program, "row_size"), row_size);
-    glDispatchCompute(num_rows, 1, 1);
+    glDispatchCompute((num_rows + 31) / 32, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -985,8 +1041,17 @@ static const char* RELU_INPLACE_SHADER_SRC =
     "layout(std430, binding = 0) buffer Data { float v[]; };\n"      /* read-write */
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) v[id] = max(0.0, v[id]);\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    if (id4 + 3u < size) {\n"
+    "        vec4 val = vec4(v[id4], v[id4+1u], v[id4+2u], v[id4+3u]);\n"
+    "        vec4 res = max(vec4(0.0), val);\n"
+    "        v[id4] = res.x; v[id4+1u] = res.y; v[id4+2u] = res.z; v[id4+3u] = res.w;\n"
+    "    } else {\n"
+    "        for (uint i = 0u; i < 4u; i++) {\n"
+    "            uint idx = id4 + i;\n"
+    "            if (idx < size) v[idx] = max(0.0, v[idx]);\n"
+    "        }\n"
+    "    }\n"
     "}\n";
 
 static GLuint relu_inplace_program = 0;
@@ -1001,7 +1066,7 @@ void tensor_relu_inplace_gpu(Tensor* t) {
     glUseProgram(relu_inplace_program);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, t->gpu_buffer);
     glUniform1ui(glGetUniformLocation(relu_inplace_program, "size"), t->size);
-    glDispatchCompute((t->size + 127) / 128, 1, 1);
+    glDispatchCompute((t->size + 511) / 512, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -1016,8 +1081,16 @@ static const char* SCALE_INPLACE_SHADER_SRC =
     "uniform uint size;\n"
     "uniform float scalar;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) v[id] *= scalar;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    if (id4 + 3u < size) {\n"
+    "        vec4 val = vec4(v[id4], v[id4+1u], v[id4+2u], v[id4+3u]) * scalar;\n"
+    "        v[id4] = val.x; v[id4+1u] = val.y; v[id4+2u] = val.z; v[id4+3u] = val.w;\n"
+    "    } else {\n"
+    "        for (uint i = 0u; i < 4u; i++) {\n"
+    "            uint idx = id4 + i;\n"
+    "            if (idx < size) v[idx] *= scalar;\n"
+    "        }\n"
+    "    }\n"
     "}\n";
 
 static GLuint scale_inplace_program = 0;
@@ -1033,7 +1106,7 @@ void tensor_scale_gpu(Tensor* t, float scalar) {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, t->gpu_buffer);
     glUniform1ui(glGetUniformLocation(scale_inplace_program, "size"), t->size);
     glUniform1f(glGetUniformLocation(scale_inplace_program, "scalar"), scalar);
-    glDispatchCompute((t->size + 255) / 256, 1, 1);
+    glDispatchCompute((t->size + 1023) / 1024, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -1056,10 +1129,11 @@ void tensor_scale_gpu(Tensor* t, float scalar) {
 
 static const char* CONV2D_SHADER_SRC =
     "#version 310 es\n"
-    "layout(local_size_x = 64) in;\n"
-    "layout(binding = 0) uniform highp sampler2D input_tex;\n"     /* one channel per draw */
-    "layout(std430, binding = 1) readonly buffer Kern { float kern[]; };\n"
-    "layout(std430, binding = 2) buffer Out { float out_data[]; };\n"
+    "layout(local_size_x = 16, local_size_y = 16) in;\n"
+    "layout(std430, binding = 0) readonly buffer InputBuf { float in_data[]; };\n"
+    "layout(std430, binding = 1) readonly buffer KernBuf { float kern_data[]; };\n"
+    "layout(std430, binding = 2) writeonly buffer OutputBuf { float out_data[]; };\n"
+    "uniform int batch;\n"
     "uniform int C_in;\n"
     "uniform int C_out;\n"
     "uniform int in_H;\n"
@@ -1071,63 +1145,53 @@ static const char* CONV2D_SHADER_SRC =
     "uniform int stride;\n"
     "uniform int padding;\n"
     "void main() {\n"
-    "    uint gid = gl_GlobalInvocationID.x;\n"
-    "    uint total = uint(C_out * out_H * out_W);\n"
-    "    if (gid >= total) return;\n"
-    "    int oc  = int(gid) / (out_H * out_W);\n"
-    "    int rem = int(gid) % (out_H * out_W);\n"
-    "    int oy  = rem / out_W;\n"
-    "    int ox  = rem % out_W;\n"
-    "    float sum = 0.0;\n"
+    "    uint ox0 = gl_GlobalInvocationID.x * 2u;\n"
+    "    uint oy = gl_GlobalInvocationID.y;\n"
+    "    uint oc_b = gl_GlobalInvocationID.z;\n"
+    "    if (ox0 >= uint(out_W) || oy >= uint(out_H) || oc_b >= uint(batch * C_out)) return;\n"
+    "    int b = int(oc_b) / C_out;\n"
+    "    int oc = int(oc_b) % C_out;\n"
+    "    float sum0 = 0.0;\n"
+    "    float sum1 = 0.0;\n"
+    "    bool has1 = (ox0 + 1u < uint(out_W));\n"
+    "    int in_slice = C_in * in_H * in_W;\n"
+    "    int b_in_offset = b * in_slice;\n"
     "    for (int ic = 0; ic < C_in; ic++) {\n"
+    "        int c_offset = b_in_offset + ic * in_H * in_W;\n"
+    "        int k_offset = (oc * C_in + ic) * kH * kW;\n"
     "        for (int ky = 0; ky < kH; ky++) {\n"
-    "            for (int kx = 0; kx < kW; kx++) {\n"
-    "                int iy = oy * stride - padding + ky;\n"
-    "                int ix = ox * stride - padding + kx;\n"
-    "                float inp = 0.0;\n"
-    "                if (iy >= 0 && iy < in_H && ix >= 0 && ix < in_W) {\n"
-    "                    /* tex coords: (ix, iy) = (col, row) in GL convention */\n"
-    "                    inp = texelFetch(input_tex, ivec2(ix + ic * in_W, iy), 0).r;\n"
+    "            int iy = int(oy) * stride - padding + ky;\n"
+    "            if (iy >= 0 && iy < in_H) {\n"
+    "                int row_offset = c_offset + iy * in_W;\n"
+    "                int k_row_offset = k_offset + ky * kW;\n"
+    "                for (int kx = 0; kx < kW; kx++) {\n"
+    "                    float w = kern_data[k_row_offset + kx];\n"
+    "                    int ix0 = int(ox0) * stride - padding + kx;\n"
+    "                    if (ix0 >= 0 && ix0 < in_W) {\n"
+    "                        sum0 += in_data[row_offset + ix0] * w;\n"
+    "                    }\n"
+    "                    if (has1) {\n"
+    "                        int ix1 = int(ox0 + 1u) * stride - padding + kx;\n"
+    "                        if (ix1 >= 0 && ix1 < in_W) {\n"
+    "                            sum1 += in_data[row_offset + ix1] * w;\n"
+    "                        }\n"
+    "                    }\n"
     "                }\n"
-    "                int kidx = ((oc * C_in + ic) * kH + ky) * kW + kx;\n"
-    "                sum += inp * kern[kidx];\n"
     "            }\n"
     "        }\n"
     "    }\n"
-    "    out_data[int(gid)] = sum;\n"
+    "    int out_slice = C_out * out_H * out_W;\n"
+    "    int base_out = b * out_slice + oc * out_H * out_W + int(oy) * out_W;\n"
+    "    out_data[base_out + int(ox0)] = sum0;\n"
+    "    if (has1) out_data[base_out + int(ox0 + 1u)] = sum1;\n"
     "}\n";
 
 static GLuint conv2d_program = 0;
-
-/*
- * Upload input tensor as a wide 2-D texture: width = C_in * W, height = H.
- * Each horizontal stripe of width W corresponds to one input channel.
- * Returns the texture ID (caller must delete).
- */
-static GLuint upload_input_texture(const Tensor* in, int C_in, int H, int W) {
-    GLuint tex;
-    glGenTextures(1, &tex);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    /* Pack all channels side by side: tex_width = C_in * W, tex_height = H */
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F,
-                 C_in * W, H, 0,
-                 GL_RED, GL_FLOAT, in->data);
-    return tex;
-}
 
 void tensor_conv2d_gpu(Tensor* out, const Tensor* in, const Tensor* kern,
                        int kH, int kW, int stride, int padding) {
     if (!rpl_gpu_init()) return;
 
-    /* Determine batch and spatial dims.
-     * Support both [C_in, H, W]  (batch=1, dims=3)
-     * and          [batch, C_in, H, W]  (dims=4).
-     */
     int batch, C_in, H, W;
     if (in->dims == 4) {
         batch = (int)in->shape[0];
@@ -1144,11 +1208,9 @@ void tensor_conv2d_gpu(Tensor* out, const Tensor* in, const Tensor* kern,
     int out_H = (H + 2*padding - kH) / stride + 1;
     int out_W = (W + 2*padding - kW) / stride + 1;
 
-    /* Make sure kernel is in CPU memory for texture upload, then push to SSBO */
-    tensor_from_gpu((Tensor*)kern);
+    tensor_to_gpu((Tensor*)in);
     tensor_to_gpu((Tensor*)kern);
 
-    /* Prepare output SSBO — size = batch * C_out * out_H * out_W */
     if (out->device != DEVICE_GPU) {
         out->dims    = (batch > 1) ? 4 : 3;
         if (batch > 1) {
@@ -1170,59 +1232,29 @@ void tensor_conv2d_gpu(Tensor* out, const Tensor* in, const Tensor* kern,
         if (conv2d_program == 0) return;
     }
 
-    /* Ensure input is in CPU memory so we can slice it per batch */
-    tensor_from_gpu((Tensor*)in);
-
     glUseProgram(conv2d_program);
-    glUniform1i(glGetUniformLocation(conv2d_program, "C_in"),    C_in);
-    glUniform1i(glGetUniformLocation(conv2d_program, "C_out"),   C_out);
-    glUniform1i(glGetUniformLocation(conv2d_program, "in_H"),    H);
-    glUniform1i(glGetUniformLocation(conv2d_program, "in_W"),    W);
-    glUniform1i(glGetUniformLocation(conv2d_program, "out_H"),   out_H);
-    glUniform1i(glGetUniformLocation(conv2d_program, "out_W"),   out_W);
-    glUniform1i(glGetUniformLocation(conv2d_program, "kH"),      kH);
-    glUniform1i(glGetUniformLocation(conv2d_program, "kW"),      kW);
-    glUniform1i(glGetUniformLocation(conv2d_program, "stride"),  stride);
-    glUniform1i(glGetUniformLocation(conv2d_program, "padding"), padding);
+    glUniform1i(glGetUniformLocation(conv2d_program, "batch"),    batch);
+    glUniform1i(glGetUniformLocation(conv2d_program, "C_in"),     C_in);
+    glUniform1i(glGetUniformLocation(conv2d_program, "C_out"),    C_out);
+    glUniform1i(glGetUniformLocation(conv2d_program, "in_H"),     H);
+    glUniform1i(glGetUniformLocation(conv2d_program, "in_W"),     W);
+    glUniform1i(glGetUniformLocation(conv2d_program, "out_H"),    out_H);
+    glUniform1i(glGetUniformLocation(conv2d_program, "out_W"),    out_W);
+    glUniform1i(glGetUniformLocation(conv2d_program, "kH"),       kH);
+    glUniform1i(glGetUniformLocation(conv2d_program, "kW"),       kW);
+    glUniform1i(glGetUniformLocation(conv2d_program, "stride"),   stride);
+    glUniform1i(glGetUniformLocation(conv2d_program, "padding"),  padding);
+
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, in->gpu_buffer);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, kern->gpu_buffer);
-    glUniform1i(glGetUniformLocation(conv2d_program, "input_tex"), 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, out->gpu_buffer);
 
-    GLuint total = (GLuint)(C_out * out_H * out_W);
-    int    slice_in  = C_in  * H * W;
-    int    slice_out = C_out * out_H * out_W;
+    GLuint gx = (GLuint)((out_W + 31) / 32);
+    GLuint gy = (GLuint)((out_H + 15) / 16);
+    GLuint gz = (GLuint)(batch * C_out);
 
-    for (int b = 0; b < batch; b++) {
-        /* Upload this batch element's slice as a texture */
-        const float* in_ptr = in->data + b * slice_in;
-
-        /* Build a temporary staging tensor pointing at this slice */
-        Tensor slice;
-        slice.data       = (float*)in_ptr;   /* read-only slice */
-        slice.dims       = 3;
-        slice.shape[0]   = C_in;
-        slice.shape[1]   = H;
-        slice.shape[2]   = W;
-        slice.size       = (uint32_t)slice_in;
-        slice.device     = DEVICE_CPU;
-        slice.gpu_buffer = 0;
-
-        GLuint tex = upload_input_texture(&slice, C_in, H, W);
-
-        /* Point Output SSBO at the correct batch offset.
-         * We use glBindBufferRange to address the sub-range. */
-        glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 2,
-                          out->gpu_buffer,
-                          (GLintptr)((size_t)b * slice_out * sizeof(float)),
-                          (GLsizeiptr)((size_t)slice_out * sizeof(float)));
-
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, tex);
-
-        glDispatchCompute((total + 63) / 64, 1, 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
-        glDeleteTextures(1, &tex);
-    }
+    glDispatchCompute(gx, gy, gz);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
 // ===================================
@@ -1244,52 +1276,56 @@ static const char* MATH_UNARY_SHADER_SRC =
     "uniform uint size;\n"
     "uniform int op;\n"
     "#define PI 3.14159265358979323846\n"
-    "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id >= size) return;\n"
-    "    float x = in_data[id];\n"
-    "    float r = 0.0;\n"
-    "    if      (op ==  0) r = sin(x);\n"
-    "    else if (op ==  1) r = cos(x);\n"
-    "    else if (op ==  2) r = tan(x);\n"
-    "    else if (op ==  3) r = asin(x);\n"
-    "    else if (op ==  4) r = acos(x);\n"
-    "    else if (op ==  5) r = atan(x);\n"
-    "    else if (op ==  6) r = sinh(x);\n"
-    "    else if (op ==  7) r = cosh(x);\n"
-    "    else if (op ==  8) r = asinh(x);\n"
-    "    else if (op ==  9) r = acosh(x);\n"
-    "    else if (op == 10) r = atanh(x);\n"
-    "    else if (op == 11) r = exp(x);\n"
-    "    else if (op == 12) r = exp2(x);\n"
-    "    else if (op == 13) r = exp(x) - 1.0;\n"
-    "    else if (op == 14) r = log(x);\n"
-    "    else if (op == 15) r = log2(x);\n"
-    "    else if (op == 16) r = log(x) / log(10.0);\n"
-    "    else if (op == 17) r = log(1.0 + x);\n"
-    "    else if (op == 18) r = sqrt(x);\n"
-    "    else if (op == 19) r = inversesqrt(x);\n"
-    "    else if (op == 20) r = x * x;\n"
-    "    else if (op == 21) r = sign(x) * exp(log(abs(x)) / 3.0);\n"
-    "    else if (op == 22) r = 1.0 / x;\n"
-    "    else if (op == 23) r = abs(x);\n"
-    "    else if (op == 24) r = -x;\n"
-    "    else if (op == 25) r = sign(x);\n"
-    "    else if (op == 26) r = x * float(PI / 180.0);\n"
-    "    else if (op == 27) r = x * float(180.0 / PI);\n"
+    "float eval_op(float x, int op) {\n"
+    "    if      (op ==  0) return sin(x);\n"
+    "    else if (op ==  1) return cos(x);\n"
+    "    else if (op ==  2) return tan(x);\n"
+    "    else if (op ==  3) return asin(x);\n"
+    "    else if (op ==  4) return acos(x);\n"
+    "    else if (op ==  5) return atan(x);\n"
+    "    else if (op ==  6) return sinh(x);\n"
+    "    else if (op ==  7) return cosh(x);\n"
+    "    else if (op ==  8) return asinh(x);\n"
+    "    else if (op ==  9) return acosh(x);\n"
+    "    else if (op == 10) return atanh(x);\n"
+    "    else if (op == 11) return exp(x);\n"
+    "    else if (op == 12) return exp2(x);\n"
+    "    else if (op == 13) return exp(x) - 1.0;\n"
+    "    else if (op == 14) return log(x);\n"
+    "    else if (op == 15) return log2(x);\n"
+    "    else if (op == 16) return log(x) / log(10.0);\n"
+    "    else if (op == 17) return log(1.0 + x);\n"
+    "    else if (op == 18) return sqrt(x);\n"
+    "    else if (op == 19) return inversesqrt(x);\n"
+    "    else if (op == 20) return x * x;\n"
+    "    else if (op == 21) return sign(x) * exp(log(abs(x)) / 3.0);\n"
+    "    else if (op == 22) return 1.0 / x;\n"
+    "    else if (op == 23) return abs(x);\n"
+    "    else if (op == 24) return -x;\n"
+    "    else if (op == 25) return sign(x);\n"
+    "    else if (op == 26) return x * float(PI / 180.0);\n"
+    "    else if (op == 27) return x * float(180.0 / PI);\n"
     "    else if (op == 28) {\n"
-    "        /* erf approximation: Abramowitz & Stegun 7.1.26 */\n"
     "        float t = 1.0 / (1.0 + 0.3275911 * abs(x));\n"
     "        float poly = t*(0.254829592+t*(-0.284496736+t*(1.421413741+t*(-1.453152027+t*1.061405429))));\n"
-    "        r = sign(x) * (1.0 - poly * exp(-x*x));\n"
+    "        return sign(x) * (1.0 - poly * exp(-x*x));\n"
     "    }\n"
-    "    else if (op == 29) r = log(x / (1.0 - x));\n"
-    "    else if (op == 30) r = floor(x + 0.5);\n"
-    "    else if (op == 31) r = floor(x);\n"
-    "    else if (op == 32) r = ceil(x);\n"
-    "    else if (op == 33) r = trunc(x);\n"
-    "    else if (op == 34) r = x - trunc(x);\n"
-    "    out_data[id] = r;\n"
+    "    else if (op == 29) return log(x / (1.0 - x));\n"
+    "    else if (op == 30) return floor(x + 0.5);\n"
+    "    else if (op == 31) return floor(x);\n"
+    "    else if (op == 32) return ceil(x);\n"
+    "    else if (op == 33) return trunc(x);\n"
+    "    else if (op == 34) return x - trunc(x);\n"
+    "    return 0.0;\n"
+    "}\n"
+    "void main() {\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            out_data[idx] = eval_op(in_data[idx], op);\n"
+    "        }\n"
+    "    }\n"
     "}\n";
 
 static GLuint math_unary_program = 0;
@@ -1313,7 +1349,7 @@ static void dispatch_math_unary(Tensor* out, const Tensor* in, int op) {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, out->gpu_buffer);
     glUniform1ui(glGetUniformLocation(math_unary_program, "size"), out->size);
     glUniform1i(glGetUniformLocation(math_unary_program, "op"), op);
-    glDispatchCompute((out->size + 255) / 256, 1, 1);
+    glDispatchCompute((out->size + 1023) / 1024, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -1368,23 +1404,27 @@ static const char* MATH_BINARY_SHADER_SRC =
     "uniform uint size_a;\n"
     "uniform uint size_b;\n"
     "uniform int op;\n"
+    "float eval_bin_op(float x, float y, int op) {\n"
+    "    if      (op == 0) return pow(abs(x), y) * sign(x);\n"
+    "    else if (op == 1) return atan(x, y);\n"
+    "    else if (op == 2) return sqrt(x*x + y*y);\n"
+    "    else if (op == 3) return x - trunc(x/y)*y;\n"
+    "    else if (op == 4) { float q = x/y; float n = (q >= 0.0) ? floor(q+0.5) : ceil(q-0.5); return x - n*y; }\n"
+    "    else if (op == 5) return floor(x/y);\n"
+    "    else if (op == 6) return max(x, y);\n"
+    "    else if (op == 7) return min(x, y);\n"
+    "    else if (op == 8) { float mx = max(x,y); return mx + log(exp(x-mx)+exp(y-mx)); }\n"
+    "    else if (op == 9) { float mx = max(x,y); return mx + log2(exp2(x-mx)+exp2(y-mx)); }\n"
+    "    return 0.0;\n"
+    "}\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id >= size_a) return;\n"
-    "    float x = a[id];\n"
-    "    float y = b[id % size_b];\n"
-    "    float r = 0.0;\n"
-    "    if      (op == 0) r = pow(abs(x), y) * sign(x);\n"
-    "    else if (op == 1) r = atan(x, y);\n"
-    "    else if (op == 2) r = sqrt(x*x + y*y);\n"
-    "    else if (op == 3) r = x - trunc(x/y)*y;\n"
-    "    else if (op == 4) { float q = x/y; float n = (q >= 0.0) ? floor(q+0.5) : ceil(q-0.5); r = x - n*y; }\n"
-    "    else if (op == 5) r = floor(x/y);\n"
-    "    else if (op == 6) r = max(x, y);\n"
-    "    else if (op == 7) r = min(x, y);\n"
-    "    else if (op == 8) { float mx = max(x,y); r = mx + log(exp(x-mx)+exp(y-mx)); }\n"
-    "    else if (op == 9) { float mx = max(x,y); r = mx + log2(exp2(x-mx)+exp2(y-mx)); }\n"
-    "    out_data[id] = r;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size_a) {\n"
+    "            out_data[idx] = eval_bin_op(a[idx], b[idx % size_b], op);\n"
+    "        }\n"
+    "    }\n"
     "}\n";
 
 static GLuint math_binary_program = 0;
@@ -1410,7 +1450,7 @@ static void dispatch_math_binary(Tensor* out, const Tensor* a, const Tensor* b, 
     glUniform1ui(glGetUniformLocation(math_binary_program, "size_a"), a->size);
     glUniform1ui(glGetUniformLocation(math_binary_program, "size_b"), b->size);
     glUniform1i(glGetUniformLocation(math_binary_program, "op"), op);
-    glDispatchCompute((a->size + 255) / 256, 1, 1);
+    glDispatchCompute((a->size + 1023) / 1024, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -1438,8 +1478,11 @@ static const char* CLAMP_SHADER_SRC =
     "uniform float lo;\n"
     "uniform float hi;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) out_data[id] = clamp(in_data[id], lo, hi);\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) out_data[idx] = clamp(in_data[idx], lo, hi);\n"
+    "    }\n"
     "}\n";
 
 static GLuint clamp_program = 0;
@@ -1463,7 +1506,7 @@ void tensor_clamp_gpu(Tensor* out, const Tensor* in, float lo, float hi) {
     glUniform1ui(glGetUniformLocation(clamp_program, "size"), out->size);
     glUniform1f(glGetUniformLocation(clamp_program, "lo"), lo);
     glUniform1f(glGetUniformLocation(clamp_program, "hi"), hi);
-    glDispatchCompute((out->size + 255) / 256, 1, 1);
+    glDispatchCompute((out->size + 1023) / 1024, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -1484,12 +1527,15 @@ static const char* CELU_SHADER_SRC =
     "uniform uint size;\n"
     "uniform float alpha;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        float pos = max(0.0, x);\n"
-    "        float neg = min(0.0, alpha * (exp(x / alpha) - 1.0));\n"
-    "        out_data[id] = pos + neg;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            float pos = max(0.0, x);\n"
+    "            float neg = min(0.0, alpha * (exp(x / alpha) - 1.0));\n"
+    "            out_data[idx] = pos + neg;\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -1513,7 +1559,7 @@ void tensor_celu_gpu(Tensor* out, const Tensor* in, float alpha) {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, out->gpu_buffer);
     glUniform1ui(glGetUniformLocation(celu_program, "size"), out->size);
     glUniform1f(glGetUniformLocation(celu_program, "alpha"), alpha);
-    glDispatchCompute((out->size + 255) / 256, 1, 1);
+    glDispatchCompute((out->size + 1023) / 1024, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -1528,10 +1574,13 @@ static const char* SOFTSIGN_SHADER_SRC =
     "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
     "uniform uint size;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        out_data[id] = x / (1.0 + abs(x));\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            out_data[idx] = x / (1.0 + abs(x));\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -1554,10 +1603,13 @@ static const char* RRELU_SHADER_SRC =
     "uniform uint size;\n"
     "uniform float slope;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        out_data[id] = (x >= 0.0) ? x : slope * x;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            out_data[idx] = (x >= 0.0) ? x : slope * x;\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -1582,7 +1634,7 @@ void tensor_rrelu_gpu(Tensor* out, const Tensor* in, float lower, float upper) {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, out->gpu_buffer);
     glUniform1ui(glGetUniformLocation(rrelu_program, "size"), out->size);
     glUniform1f(glGetUniformLocation(rrelu_program, "slope"), slope);
-    glDispatchCompute((out->size + 255) / 256, 1, 1);
+    glDispatchCompute((out->size + 1023) / 1024, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -1599,10 +1651,13 @@ static const char* THRESHOLD_SHADER_SRC =
     "uniform float threshold;\n"
     "uniform float value;\n"
     "void main() {\n"
-    "    uint id = gl_GlobalInvocationID.x;\n"
-    "    if (id < size) {\n"
-    "        float x = in_data[id];\n"
-    "        out_data[id] = (x > threshold) ? x : value;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint idx = id4 + k;\n"
+    "        if (idx < size) {\n"
+    "            float x = in_data[idx];\n"
+    "            out_data[idx] = (x > threshold) ? x : value;\n"
+    "        }\n"
     "    }\n"
     "}\n";
 
@@ -1627,7 +1682,345 @@ void tensor_threshold_gpu(Tensor* out, const Tensor* in, float threshold, float 
     glUniform1ui(glGetUniformLocation(threshold_program, "size"), out->size);
     glUniform1f(glGetUniformLocation(threshold_program, "threshold"), threshold);
     glUniform1f(glGetUniformLocation(threshold_program, "value"), value);
-    glDispatchCompute((out->size + 255) / 256, 1, 1);
+    glDispatchCompute((out->size + 1023) / 1024, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+// ===================================
+// RMSNorm GPU Kernel
+// ===================================
+
+static const char* RMSNORM_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 256) in;\n"
+    "layout(std430, binding = 0) readonly buffer Input { float in_data[]; };\n"
+    "layout(std430, binding = 1) readonly buffer Weight { float weight[]; };\n"
+    "layout(std430, binding = 2) writeonly buffer Output { float out_data[]; };\n"
+    "uniform uint num_rows;\n"
+    "uniform uint row_size;\n"
+    "uniform float eps;\n"
+    "shared float s_sum[256];\n"
+    "void main() {\n"
+    "    uint row = gl_GlobalInvocationID.y;\n"
+    "    if (row >= num_rows) return;\n"
+    "    uint base = row * row_size;\n"
+    "    uint tid = gl_LocalInvocationID.x;\n"
+    "    float local_sum = 0.0;\n"
+    "    for (uint i = tid; i < row_size; i += 256u) {\n"
+    "        float val = in_data[base + i];\n"
+    "        local_sum += val * val;\n"
+    "    }\n"
+    "    s_sum[tid] = local_sum;\n"
+    "    barrier();\n"
+    "    for (uint s = 128u; s > 0u; s >>= 1u) {\n"
+    "        if (tid < s) {\n"
+    "            s_sum[tid] += s_sum[tid + s];\n"
+    "        }\n"
+    "        barrier();\n"
+    "    }\n"
+    "    float ms = s_sum[0] / float(row_size);\n"
+    "    float rms_inv = 1.0 / sqrt(ms + eps);\n"
+    "    for (uint i = tid; i < row_size; i += 256u) {\n"
+    "        out_data[base + i] = in_data[base + i] * rms_inv * weight[i];\n"
+    "    }\n"
+    "}\n";
+
+static GLuint rmsnorm_program = 0;
+
+void tensor_rmsnorm_gpu(Tensor* out, const Tensor* in, const Tensor* weight, float eps) {
+    if (!rpl_gpu_init()) return;
+    tensor_to_gpu((Tensor*)in);
+    tensor_to_gpu((Tensor*)weight);
+    if (out->device != DEVICE_GPU) {
+        out->dims = in->dims;
+        memcpy(out->shape, in->shape, sizeof(in->shape));
+        out->size = in->size;
+        tensor_to_gpu(out);
+    }
+    if (rmsnorm_program == 0) {
+        rmsnorm_program = compile_compute_shader(RMSNORM_SHADER_SRC);
+        if (rmsnorm_program == 0) return;
+    }
+    uint32_t row_size = in->shape[in->dims - 1];
+    uint32_t num_rows = in->size / row_size;
+    glUseProgram(rmsnorm_program);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, in->gpu_buffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, weight->gpu_buffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, out->gpu_buffer);
+    glUniform1ui(glGetUniformLocation(rmsnorm_program, "num_rows"), num_rows);
+    glUniform1ui(glGetUniformLocation(rmsnorm_program, "row_size"), row_size);
+    glUniform1f(glGetUniformLocation(rmsnorm_program, "eps"), eps);
+    glDispatchCompute(1, num_rows, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+// ===================================
+// RoPE GPU Kernel
+// ===================================
+
+static const char* ROPE_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 128) in;\n"
+    "layout(std430, binding = 0) buffer QData { float q_data[]; };\n"
+    "layout(std430, binding = 1) buffer KData { float k_data[]; };\n"
+    "uniform uint seq_len;\n"
+    "uniform uint num_heads_q;\n"
+    "uniform uint num_heads_k;\n"
+    "uniform uint dim_head;\n"
+    "uniform float theta;\n"
+    "void main() {\n"
+    "    uint d = gl_GlobalInvocationID.x; // process half dimension (dim_head / 2)\n"
+    "    uint h_q = gl_GlobalInvocationID.y; // head id q\n"
+    "    uint s = gl_GlobalInvocationID.z; // seq index b * seq_len + seq_pos\n"
+    "    if (d >= dim_head / 2u || h_q >= num_heads_q) return;\n"
+    "\n"
+    "    uint seq_pos = s % seq_len;\n"
+    "    float freq = 1.0 / pow(theta, float(2u * d) / float(dim_head));\n"
+    "    float val = float(seq_pos) * freq;\n"
+    "    float cos_val = cos(val);\n"
+    "    float sin_val = sin(val);\n"
+    "\n"
+    "    // Q transform\n"
+    "    uint q_idx = (s * num_heads_q + h_q) * dim_head + d;\n"
+    "    float q0 = q_data[q_idx];\n"
+    "    float q1 = q_data[q_idx + dim_head / 2u];\n"
+    "    q_data[q_idx] = q0 * cos_val - q1 * sin_val;\n"
+    "    q_data[q_idx + dim_head / 2u] = q0 * sin_val + q1 * cos_val;\n"
+    "\n"
+    "    // K transform\n"
+    "    if (h_q < num_heads_k) {\n"
+    "        uint k_idx = (s * num_heads_k + h_q) * dim_head + d;\n"
+    "        float k0 = k_data[k_idx];\n"
+    "        float k1 = k_data[k_idx + dim_head / 2u];\n"
+    "        k_data[k_idx] = k0 * cos_val - k1 * sin_val;\n"
+    "        k_data[k_idx + dim_head / 2u] = k0 * sin_val + k1 * cos_val;\n"
+    "    }\n"
+    "}\n";
+
+static GLuint rope_program = 0;
+
+void tensor_rope_gpu(Tensor* q, Tensor* k, uint32_t dim_head, float theta) {
+    if (!rpl_gpu_init()) return;
+    tensor_to_gpu(q);
+    tensor_to_gpu(k);
+    if (rope_program == 0) {
+        rope_program = compile_compute_shader(ROPE_SHADER_SRC);
+        if (rope_program == 0) return;
+    }
+    uint32_t seq_len = q->shape[1];
+    uint32_t num_heads_q = q->shape[2];
+    uint32_t num_heads_k = k->shape[2];
+    uint32_t batch_size = q->shape[0];
+    if (q->dims < 3) {
+        seq_len = q->shape[0];
+        num_heads_q = q->shape[1] / dim_head;
+        batch_size = 1;
+    }
+    glUseProgram(rope_program);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, q->gpu_buffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, k->gpu_buffer);
+    glUniform1ui(glGetUniformLocation(rope_program, "seq_len"), seq_len);
+    glUniform1ui(glGetUniformLocation(rope_program, "num_heads_q"), num_heads_q);
+    glUniform1ui(glGetUniformLocation(rope_program, "num_heads_k"), num_heads_k);
+    glUniform1ui(glGetUniformLocation(rope_program, "dim_head"), dim_head);
+    glUniform1f(glGetUniformLocation(rope_program, "theta"), theta);
+    
+    GLuint groups_x = ((dim_head / 2) + 127) / 128;
+    glDispatchCompute(groups_x, num_heads_q, batch_size * seq_len);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+// ===================================
+// Gated Attention GPU Kernel
+// ===================================
+
+static const char* GATED_ATTN_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 32) in;\n"
+    "layout(std430, binding = 0) readonly buffer BufQ { float Q[]; };\n"
+    "layout(std430, binding = 1) readonly buffer BufK { float K[]; };\n"
+    "layout(std430, binding = 2) readonly buffer BufV { float V[]; };\n"
+    "layout(std430, binding = 3) readonly buffer BufGate { float Gate[]; };\n"
+    "layout(std430, binding = 4) writeonly buffer BufOut { float Out[]; };\n"
+    "uniform uint seq_len_q;\n"
+    "uniform uint seq_len_k;\n"
+    "uniform uint num_heads_q;\n"
+    "uniform uint num_heads_kv;\n"
+    "uniform uint d_k;\n"
+    "uniform float scale;\n"
+    "uniform int has_gate;\n"
+    "void main() {\n"
+    "    uint i = gl_GlobalInvocationID.y; // seq_q index\n"
+    "    uint h_q = gl_GlobalInvocationID.z; // head q index\n"
+    "    if (i >= seq_len_q || h_q >= num_heads_q) return;\n"
+    "    uint b = gl_GlobalInvocationID.x; // batch block\n" // simplification, only 1 batch supported locally
+    "    uint group_size = num_heads_q / num_heads_kv;\n"
+    "    uint h_kv = h_q / group_size;\n"
+    "    uint q_base = ((b * seq_len_q + i) * num_heads_q + h_q) * d_k;\n"
+    "    // Compute scores locally (up to max seq len ~ 4096 in this naive kernel, dynamically allocated in global for large, but we use a small shared or direct loop here)\n"
+    "    float max_val = -1e9;\n"
+    "    // For simplicity, we write a naive O(N^2) serial scan per thread. For true GPU, requires shared mem tile matmul.\n"
+    "    // This is a placeholder for small sequences.\n"
+    "}\n";
+
+static GLuint gated_attn_program = 0;
+
+void tensor_gated_attention_gpu(Tensor* out, const Tensor* Q, const Tensor* K, const Tensor* V, const Tensor* gate, const Tensor* mask) {
+    // Stub implementation. For performance, complex attention needs tiled GEMMs.
+    // Falling back to CPU if called.
+    (void)out; (void)Q; (void)K; (void)V; (void)gate; (void)mask;
+    fprintf(stderr, "tensor_gated_attention_gpu not fully implemented, falling back.\n");
+}
+
+// ===================================
+// Gated DeltaNet GPU Kernel (Naive)
+// ===================================
+
+static const char* GATED_DELTANET_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 1) in;\n"
+    "void main() {}\n";
+
+static GLuint gated_deltanet_program = 0;
+
+void tensor_gated_deltanet_gpu(Tensor* out, const Tensor* Q, const Tensor* K, const Tensor* V, const Tensor* gate, const Tensor* beta) {
+    (void)out; (void)Q; (void)K; (void)V; (void)gate; (void)beta;
+    fprintf(stderr, "tensor_gated_deltanet_gpu not fully implemented, falling back.\n");
+}
+
+// ===================================
+// SwiGLU GPU Kernel (Swish(x[:d/2]) * x[d/2:])
+// ===================================
+
+static const char* SWIGLU_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 256) in;\n"
+    "layout(std430, binding = 0) readonly buffer Input { float in_data[]; };\n"
+    "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
+    "uniform uint pre_dim;\n"
+    "uniform uint half_dim;\n"
+    "uniform uint stride;\n"
+    "void main() {\n"
+    "    uint total_out = pre_dim * half_dim * stride;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint id = id4 + k;\n"
+    "        if (id < total_out) {\n"
+    "            uint p = id / (half_dim * stride);\n"
+    "            uint rem = id % (half_dim * stride);\n"
+    "            uint h = rem / stride;\n"
+    "            uint s = rem % stride;\n"
+    "            uint in_idx1 = p * (half_dim * 2u) * stride + h * stride + s;\n"
+    "            uint in_idx2 = p * (half_dim * 2u) * stride + (h + half_dim) * stride + s;\n"
+    "            float x = in_data[in_idx1];\n"
+    "            float gate = in_data[in_idx2];\n"
+    "            float sigmoid = 1.0 / (1.0 + exp(-x));\n"
+    "            out_data[id] = x * sigmoid * gate;\n"
+    "        }\n"
+    "    }\n"
+    "}\n";
+
+static GLuint swiglu_program = 0;
+
+void tensor_swiglu_gpu(Tensor* out, const Tensor* in, int32_t dim) {
+    if (!rpl_gpu_init()) return;
+    tensor_to_gpu((Tensor*)in);
+    
+    if (dim < 0) dim += in->dims;
+    uint32_t stride = 1;
+    for (uint32_t i = dim + 1; i < in->dims; i++) stride *= in->shape[i];
+    uint32_t half_dim = in->shape[dim] / 2;
+    uint32_t pre_dim = 1;
+    for (uint32_t i = 0; i < dim; i++) pre_dim *= in->shape[i];
+    
+    if (out->device != DEVICE_GPU) {
+        out->dims = in->dims;
+        memcpy(out->shape, in->shape, sizeof(in->shape));
+        out->shape[dim] = half_dim;
+        out->size = in->size / 2;
+        tensor_to_gpu(out);
+    }
+    if (swiglu_program == 0) {
+        swiglu_program = compile_compute_shader(SWIGLU_SHADER_SRC);
+        if (swiglu_program == 0) return;
+    }
+    glUseProgram(swiglu_program);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, in->gpu_buffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, out->gpu_buffer);
+    glUniform1ui(glGetUniformLocation(swiglu_program, "pre_dim"), pre_dim);
+    glUniform1ui(glGetUniformLocation(swiglu_program, "half_dim"), half_dim);
+    glUniform1ui(glGetUniformLocation(swiglu_program, "stride"), stride);
+    uint32_t out_size = pre_dim * half_dim * stride;
+    glDispatchCompute((out_size + 1023) / 1024, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+
+// ===================================
+// GeGLU GPU Kernel (GELU(x[:d/2]) * x[d/2:])
+// ===================================
+
+static const char* GEGLU_SHADER_SRC =
+    "#version 310 es\n"
+    "layout(local_size_x = 256) in;\n"
+    "layout(std430, binding = 0) readonly buffer Input { float in_data[]; };\n"
+    "layout(std430, binding = 1) writeonly buffer Output { float out_data[]; };\n"
+    "uniform uint pre_dim;\n"
+    "uniform uint half_dim;\n"
+    "uniform uint stride;\n"
+    "void main() {\n"
+    "    uint total_out = pre_dim * half_dim * stride;\n"
+    "    uint id4 = gl_GlobalInvocationID.x << 2u;\n"
+    "    for (uint k = 0u; k < 4u; ++k) {\n"
+    "        uint id = id4 + k;\n"
+    "        if (id < total_out) {\n"
+    "            uint p = id / (half_dim * stride);\n"
+    "            uint rem = id % (half_dim * stride);\n"
+    "            uint h = rem / stride;\n"
+    "            uint s = rem % stride;\n"
+    "            uint in_idx1 = p * (half_dim * 2u) * stride + h * stride + s;\n"
+    "            uint in_idx2 = p * (half_dim * 2u) * stride + (h + half_dim) * stride + s;\n"
+    "            float x = in_data[in_idx1];\n"
+    "            float gate = in_data[in_idx2];\n"
+    "            float inner = 0.7978845608 * (x + 0.044715 * x * x * x);\n"
+    "            float gelu = 0.5 * x * (1.0 + tanh(inner));\n"
+    "            out_data[id] = gelu * gate;\n"
+    "        }\n"
+    "    }\n"
+    "}\n";
+
+static GLuint geglu_program = 0;
+
+void tensor_geglu_gpu(Tensor* out, const Tensor* in, int32_t dim) {
+    if (!rpl_gpu_init()) return;
+    tensor_to_gpu((Tensor*)in);
+    
+    if (dim < 0) dim += in->dims;
+    uint32_t stride = 1;
+    for (uint32_t i = dim + 1; i < in->dims; i++) stride *= in->shape[i];
+    uint32_t half_dim = in->shape[dim] / 2;
+    uint32_t pre_dim = 1;
+    for (uint32_t i = 0; i < dim; i++) pre_dim *= in->shape[i];
+    
+    if (out->device != DEVICE_GPU) {
+        out->dims = in->dims;
+        memcpy(out->shape, in->shape, sizeof(in->shape));
+        out->shape[dim] = half_dim;
+        out->size = in->size / 2;
+        tensor_to_gpu(out);
+    }
+    if (geglu_program == 0) {
+        geglu_program = compile_compute_shader(GEGLU_SHADER_SRC);
+        if (geglu_program == 0) return;
+    }
+    glUseProgram(geglu_program);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, in->gpu_buffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, out->gpu_buffer);
+    glUniform1ui(glGetUniformLocation(geglu_program, "pre_dim"), pre_dim);
+    glUniform1ui(glGetUniformLocation(geglu_program, "half_dim"), half_dim);
+    glUniform1ui(glGetUniformLocation(geglu_program, "stride"), stride);
+    uint32_t out_size = pre_dim * half_dim * stride;
+    glDispatchCompute((out_size + 1023) / 1024, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -1725,6 +2118,14 @@ void tensor_celu_gpu(Tensor* o, const Tensor* i, float a)                 { (voi
 void tensor_softsign_gpu(Tensor* o, const Tensor* i)                      { (void)o;(void)i; }
 void tensor_rrelu_gpu(Tensor* o, const Tensor* i, float lo, float hi)     { (void)o;(void)i;(void)lo;(void)hi; }
 void tensor_threshold_gpu(Tensor* o, const Tensor* i, float th, float v)  { (void)o;(void)i;(void)th;(void)v; }
+
+/* LM Ops stubs */
+void tensor_rmsnorm_gpu(Tensor* out, const Tensor* in, const Tensor* weight, float eps) { (void)out; (void)in; (void)weight; (void)eps; }
+void tensor_rope_gpu(Tensor* q, Tensor* k, uint32_t dim_head, float theta) { (void)q; (void)k; (void)dim_head; (void)theta; }
+void tensor_gated_attention_gpu(Tensor* out, const Tensor* Q, const Tensor* K, const Tensor* V, const Tensor* gate, const Tensor* mask) { (void)out; (void)Q; (void)K; (void)V; (void)gate; (void)mask; }
+void tensor_gated_deltanet_gpu(Tensor* out, const Tensor* Q, const Tensor* K, const Tensor* V, const Tensor* gate, const Tensor* beta) { (void)out; (void)Q; (void)K; (void)V; (void)gate; (void)beta; }
+void tensor_swiglu_gpu(Tensor* out, const Tensor* in, int32_t dim) { (void)out; (void)in; (void)dim; }
+void tensor_geglu_gpu(Tensor* out, const Tensor* in, int32_t dim) { (void)out; (void)in; (void)dim; }
 
 #endif /* USE_GPU */
 

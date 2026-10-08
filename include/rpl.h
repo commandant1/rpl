@@ -99,6 +99,24 @@ void tensor_free_gpu(struct Tensor* t);
 // Core Tensor Structure
 // ============================================================
 
+// Operation enum for backward dispatch (avoids function pointers for cache)
+typedef enum {
+    OP_NONE = 0,
+    OP_ADD, OP_SUB, OP_MUL, OP_DIV,
+    OP_MATMUL, OP_GEMM,
+    OP_RELU, OP_SIGMOID, OP_TANH, OP_GELU, OP_SOFTMAX,
+    OP_LEAKY_RELU, OP_ELU, OP_SWISH, OP_SELU, OP_MISH,
+    OP_MSE_LOSS, OP_CE_LOSS,
+    OP_CONV2D, OP_MAXPOOL2D,
+    OP_LAYERNORM, OP_BATCHNORM, OP_RMSNORM,
+    OP_RESHAPE, OP_TRANSPOSE, OP_SLICE,
+    OP_SUM, OP_MEAN,
+    OP_MUL_SCALAR, OP_ADD_SCALAR,
+    OP_EMBEDDING, OP_DROPOUT,
+    OP_LOG, OP_EXP, OP_SQRT, OP_NEG, OP_ABS,
+    OP_NUM_OPS
+} OpType;
+
 typedef struct Tensor {
     float* data;
     float* grad;
@@ -115,8 +133,17 @@ typedef struct Tensor {
     DeviceType device;
     uint32_t gpu_buffer;  // OpenGL Buffer Object ID
     
-    // Autograd
+    // Autograd (NEW — replaces parent1/parent2/backward_fn)
     bool is_leaf;
+    bool _visited;            // Visited flag for topological sort
+    int32_t _refcount;        // Reference counting for graph memory management
+    OpType _op;               // Operation that created this tensor
+    struct Tensor* _parents[3]; // Parent tensors (max 3 for ternary/layered ops)
+    uint8_t _n_parents;       // Number of parents (0 to 3)
+    float _saved_scalar;      // Saved scalar for scalar ops (alpha, negative_slope, etc.)
+    uint32_t _grad_refcount;  // How many children still need to backprop through this node
+    
+    // Legacy compatibility (kept for transition period)
     struct Tensor* parent1;
     struct Tensor* parent2;
     void (*backward_fn)(struct Tensor*);
@@ -143,8 +170,12 @@ typedef struct HalfTensor {
 // Memory management
 Tensor* tensor_create(uint32_t dims, const uint32_t* shape, bool requires_grad);
 void tensor_free(Tensor* t);
+void tensor_free_grad(Tensor* t);
 void* rpitorch_aligned_alloc(size_t alignment, size_t size);
 void rpitorch_aligned_free(void* ptr);
+void rpl_empty_cache(void);
+void* pool_alloc(size_t size);
+void pool_free(void* ptr, size_t size);
 
 // GPU Operations
 bool rpl_gpu_init();
@@ -183,6 +214,8 @@ void tensor_selu_gpu(Tensor* out, const Tensor* in);
 void tensor_mish_gpu(Tensor* out, const Tensor* in);
 void tensor_hardswish_gpu(Tensor* out, const Tensor* in);
 void tensor_hardsigmoid_gpu(Tensor* out, const Tensor* in);
+void tensor_swiglu_gpu(Tensor* out, const Tensor* in, int32_t dim);
+void tensor_geglu_gpu(Tensor* out, const Tensor* in, int32_t dim);
 void tensor_softplus_gpu(Tensor* out, const Tensor* in, float beta, float threshold);
 void tensor_log_softmax_gpu(Tensor* out, const Tensor* in);
 void tensor_scale_gpu(Tensor* t, float scalar);
@@ -284,6 +317,8 @@ void tensor_mish(Tensor* out, const Tensor* in);
 void tensor_mish_inplace(Tensor* t);
 void tensor_hardswish(Tensor* out, const Tensor* in);
 void tensor_hardswish_inplace(Tensor* t);
+void tensor_swiglu(Tensor* out, const Tensor* in, int32_t dim);
+void tensor_geglu(Tensor* out, const Tensor* in, int32_t dim);
 void tensor_hardsigmoid(Tensor* out, const Tensor* in);
 void tensor_hardsigmoid_inplace(Tensor* t);
 void tensor_hardtanh(Tensor* out, const Tensor* in, float min_val, float max_val);
@@ -303,12 +338,51 @@ void tensor_threshold_inplace(Tensor* t, float threshold, float value);
 // Autograd
 void tensor_backward(Tensor* t);
 void tensor_zero_grad(Tensor* t);
+
+// Reference counting
+void tensor_retain(Tensor* t);
+void tensor_release(Tensor* t);
+
+// Gradient context
+void rpl_set_grad_enabled(bool enabled);
+bool rpl_is_grad_enabled(void);
+
+// Backward function declarations
 void backward_add(Tensor* t);
+void backward_sub(Tensor* t);
 void backward_mul(Tensor* t);
+void backward_div(Tensor* t);
 void backward_matmul(Tensor* t);
 void backward_relu(Tensor* t);
 void backward_sigmoid(Tensor* t);
+void backward_tanh(Tensor* t);
+void backward_gelu(Tensor* t);
+void backward_softmax(Tensor* t);
+void backward_leaky_relu(Tensor* t);
+void backward_elu(Tensor* t);
+void backward_swish(Tensor* t);
 void backward_mse(Tensor* t);
+void backward_log(Tensor* t);
+void backward_exp(Tensor* t);
+void backward_sqrt(Tensor* t);
+void backward_neg(Tensor* t);
+void backward_abs(Tensor* t);
+void backward_sum(Tensor* t);
+void backward_mean(Tensor* t);
+void backward_add_scalar(Tensor* t);
+void backward_mul_scalar(Tensor* t);
+void backward_selu(Tensor* t);
+void backward_mish(Tensor* t);
+void backward_dropout(Tensor* t);
+void backward_embedding(Tensor* t);
+void backward_conv2d(Tensor* t);
+void backward_maxpool2d(Tensor* t);
+void backward_layernorm(Tensor* t);
+void backward_batchnorm(Tensor* t);
+void backward_rmsnorm(Tensor* t);
+void backward_reshape(Tensor* t);
+void backward_transpose(Tensor* t);
+void backward_slice(Tensor* t);
 
 // ============================================================
 // Quantization
@@ -347,10 +421,13 @@ typedef struct LSTMLayer LSTMLayer;
 typedef struct GRULayer GRULayer;
 typedef struct BatchNorm2dLayer BatchNorm2dLayer;
 typedef struct LayerNormLayer LayerNormLayer;
+typedef struct GroupNormLayer GroupNormLayer;
+typedef struct RMSNormLayer RMSNormLayer;
 typedef struct EmbeddingLayer EmbeddingLayer;
 typedef struct DropoutLayer DropoutLayer;
 typedef struct MaxPool2dLayer MaxPool2dLayer;
-typedef struct LRScheduler LRScheduler;
+typedef struct SPPLayer SPPLayer;
+typedef struct ConvTranspose2dLayer ConvTranspose2dLayer;
 
 // Attention
 typedef struct MultiHeadAttention MultiHeadAttention;
@@ -363,6 +440,27 @@ void multi_head_attention_free(MultiHeadAttention* mha);
 PositionalEncoding* positional_encoding_create(uint32_t max_len, uint32_t d_model, bool learnable);
 Tensor* positional_encoding_forward(PositionalEncoding* pe, const Tensor* input);
 void positional_encoding_free(PositionalEncoding* pe);
+
+void tensor_rope(Tensor* q, Tensor* k, uint32_t dim_head, float theta);
+
+Tensor* gated_attention_forward(const Tensor* Q, const Tensor* K, const Tensor* V, const Tensor* gate, const Tensor* mask);
+Tensor* gated_deltanet_forward(const Tensor* Q, const Tensor* K, const Tensor* V, const Tensor* gate, const Tensor* beta);
+
+// KV Cache
+typedef struct KVCache {
+    uint32_t max_seq_len;
+    uint32_t batch_size;
+    uint32_t num_heads;
+    uint32_t head_dim;
+    uint32_t current_pos;
+    
+    Tensor* key_cache;   // [batch_size, max_seq_len, num_heads, head_dim]
+    Tensor* value_cache; // [batch_size, max_seq_len, num_heads, head_dim]
+} KVCache;
+
+KVCache* kv_cache_create(uint32_t max_seq_len, uint32_t batch_size, uint32_t num_heads, uint32_t head_dim);
+void kv_cache_update(KVCache* cache, const Tensor* k_new, const Tensor* v_new, uint32_t seq_len_new);
+void kv_cache_free(KVCache* cache);
 
 // Vision layers
 typedef struct ResBlock ResBlock;
@@ -400,14 +498,38 @@ BatchNorm2dLayer* batchnorm2d_create(uint32_t num_features, float momentum, floa
 Tensor* batchnorm2d_forward(BatchNorm2dLayer* layer, const Tensor* input);
 void batchnorm2d_free(BatchNorm2dLayer* layer);
 
+// LSTM
+LSTMLayer* lstm_create(uint32_t input_size, uint32_t hidden_size);
+void tensor_lstm_forward(LSTMLayer* layer, const Tensor* input, Tensor* h_0, Tensor* c_0, Tensor* out_h, Tensor* out_c);
+void lstm_free(LSTMLayer* layer);
+
+// GRU
+GRULayer* gru_create(uint32_t input_size, uint32_t hidden_size);
+void tensor_gru_forward(GRULayer* layer, const Tensor* input, Tensor* h_0, Tensor* out_h);
+void gru_free(GRULayer* layer);
+
 // LayerNorm
 LayerNormLayer* layer_norm_create(uint32_t normalized_shape, float eps);
 Tensor* layer_norm_forward(LayerNormLayer* layer, const Tensor* input);
 void layer_norm_free(LayerNormLayer* layer);
 
-// Embedding
+// GroupNorm
+GroupNormLayer* group_norm_create(uint32_t num_groups, uint32_t num_channels, float eps);
+Tensor* group_norm_forward(GroupNormLayer* layer, const Tensor* input);
+void group_norm_free(GroupNormLayer* layer);
+
+// RMSNorm
+struct RMSNormLayer {
+    uint32_t normalized_shape;
+    float eps;
+    Tensor* weight;  // [normalized_shape]
+};
+RMSNormLayer* rmsnorm_create(uint32_t normalized_shape, float eps);
+Tensor* rmsnorm_forward(RMSNormLayer* layer, const Tensor* input);
+void rmsnorm_free(RMSNormLayer* layer);
+
 EmbeddingLayer* embedding_create(uint32_t num_embeddings, uint32_t embedding_dim);
-Tensor* embedding_forward(EmbeddingLayer* layer, const uint32_t* indices, uint32_t num_indices);
+Tensor* embedding_forward(EmbeddingLayer* layer, const Tensor* indices);
 void embedding_free(EmbeddingLayer* layer);
 
 // Dropout
@@ -445,13 +567,37 @@ SPPLayer* spp_create(uint32_t* pool_sizes, uint32_t num_levels);
 Tensor* spp_forward(SPPLayer* layer, const Tensor* input);
 void spp_free(SPPLayer* layer);
 
+// ConvTranspose2d
+struct ConvTranspose2dLayer {
+    Tensor* weight;  // [in_channels, out_channels, kernel_size[0], kernel_size[1]]
+    Tensor* bias;    // [out_channels]
+    uint32_t in_channels;
+    uint32_t out_channels;
+    uint32_t kernel_size[2];
+    uint32_t stride[2];
+    uint32_t padding[2];
+    uint32_t output_padding[2];
+};
+
+ConvTranspose2dLayer* conv_transpose2d_create(uint32_t in_channels, uint32_t out_channels,
+                                              uint32_t kernel_h, uint32_t kernel_w,
+                                              uint32_t stride_h, uint32_t stride_w,
+                                              uint32_t padding_h, uint32_t padding_w,
+                                              uint32_t out_pad_h, uint32_t out_pad_w);
+Tensor* conv_transpose2d_forward(ConvTranspose2dLayer* layer, const Tensor* input);
+void conv_transpose2d_free(ConvTranspose2dLayer* layer);
+
+// Loss functions
+
 // ============================================================
 // Loss & Training
 // ============================================================
-
+// Loss functions
 float mse_loss(const Tensor* pred, const Tensor* target);
 float cross_entropy_loss(const Tensor* pred, const Tensor* target);
 float binary_cross_entropy_loss(const Tensor* pred, const Tensor* target);
+float huber_loss(const Tensor* pred, const Tensor* target, float delta);
+float triplet_margin_loss(const Tensor* anchor, const Tensor* positive, const Tensor* negative, float margin);
 
 typedef enum {
     OPTIMIZER_SGD,
@@ -468,6 +614,7 @@ Optimizer* optimizer_adam_create(Tensor** parameters, uint32_t num_params, float
 Optimizer* optimizer_adamw_create(Tensor** parameters, uint32_t num_params, float lr, float beta1, float beta2, float epsilon, float weight_decay);
 void optimizer_step(Optimizer* opt);
 void optimizer_zero_grad(Optimizer* opt);
+void optimizer_zero_grad_set_to_none(Optimizer* opt);
 void optimizer_free(Optimizer* opt);
 
 typedef struct EarlyStopping EarlyStopping;
@@ -855,6 +1002,11 @@ Tensor* tensor_bernoulli(const Tensor* probs);
 Tensor* tensor_normal(float mean, float std, uint32_t dims, const uint32_t* shape);
 Tensor* tensor_poisson_sample(const Tensor* rates);
 Tensor* tensor_multinomial(const Tensor* probs, uint32_t num_samples, bool replacement);
+
+uint32_t tensor_sample_top_p(const Tensor* logits, float top_p, float temperature);
+uint32_t tensor_sample_top_k(const Tensor* logits, uint32_t top_k, float temperature);
+uint32_t tensor_sample_min_p(const Tensor* logits, float min_p, float temperature);
+void tensor_apply_repetition_penalty(Tensor* logits, const uint32_t* generated_tokens, uint32_t count, float penalty);
 void tensor_meshgrid(const Tensor** inputs, uint32_t n_inputs, Tensor** outputs);
 
 // ============================================================

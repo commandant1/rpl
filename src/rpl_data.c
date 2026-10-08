@@ -468,8 +468,68 @@ bool dataloader_next(DataLoader* loader, Tensor** batch_samples, Tensor** batch_
             return false;
         }
         
-        // Load batch synchronously
-        // (Implementation similar to worker thread)
+        uint32_t batch_start = loader->current_idx;
+        uint32_t batch_end = batch_start + loader->batch_size;
+        if (batch_end > loader->dataset->num_samples) {
+            if (loader->drop_last) {
+                loader->current_idx = loader->dataset->num_samples;
+                return false;
+            }
+            batch_end = loader->dataset->num_samples;
+        }
+        
+        uint32_t actual_batch_size = batch_end - batch_start;
+        if (actual_batch_size == 0) {
+            loader->current_idx = loader->dataset->num_samples;
+            return false;
+        }
+        
+        loader->current_idx = batch_end;
+        
+        // Allocate batch tensors
+        uint32_t sample_shape[RPITORCH_MAX_DIMS + 1];
+        uint32_t label_shape[RPITORCH_MAX_DIMS + 1];
+        
+        sample_shape[0] = actual_batch_size;
+        label_shape[0] = actual_batch_size;
+        
+        for (uint32_t i = 0; i < loader->dataset->sample_dims; i++) {
+            sample_shape[i + 1] = loader->dataset->sample_shape[i];
+        }
+        for (uint32_t i = 0; i < loader->dataset->label_dims; i++) {
+            label_shape[i + 1] = loader->dataset->label_shape[i];
+        }
+        
+        Tensor* batch_samples_val = tensor_create(loader->dataset->sample_dims + 1, sample_shape, false);
+        Tensor* batch_labels_val = tensor_create(loader->dataset->label_dims + 1, label_shape, false);
+        
+        TensorDatasetData* ds_data = (TensorDatasetData*)loader->dataset->data;
+        uint32_t sample_size = ds_data->sample_size;
+        uint32_t label_size = ds_data->label_size;
+        
+        for (uint32_t i = 0; i < actual_batch_size; i++) {
+            uint32_t idx = loader->indices[batch_start + i];
+            
+            // Copy sample
+            memcpy(&batch_samples_val->data[i * sample_size],
+                   &ds_data->samples[idx * sample_size],
+                   sample_size * sizeof(float));
+            
+            // Copy label
+            memcpy(&batch_labels_val->data[i * label_size],
+                   &ds_data->labels[idx * label_size],
+                   label_size * sizeof(float));
+            
+            // Apply augmentation
+            if (loader->augmentation) {
+                apply_augmentation(&batch_samples_val->data[i * sample_size],
+                                 sample_size, loader->augmentation,
+                                 sample_shape[1], sample_shape[2], sample_shape[3]);
+            }
+        }
+        
+        *batch_samples = batch_samples_val;
+        *batch_labels = batch_labels_val;
         return true;
     }
 }

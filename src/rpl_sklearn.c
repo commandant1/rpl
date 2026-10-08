@@ -587,9 +587,6 @@ void svm_fit(SVM* svm, const float* X, const float* y, uint32_t n_samples, uint3
                 if (j == i) j = (j + 1) % n_samples;
                 
                 // Simple update
-                float old_alpha_i = svm->alphas[i];
-                float old_alpha_j = svm->alphas[j];
-                
                 svm->alphas[i] += 0.01f * y[i] * E_i;
                 svm->alphas[i] = fmaxf(0.0f, fminf(svm->C, svm->alphas[i]));
                 

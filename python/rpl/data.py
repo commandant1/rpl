@@ -16,6 +16,16 @@ _lib.dataloader_create.restype = ctypes.POINTER(RDataLoader)
 _lib.dataloader_free.argtypes = [ctypes.POINTER(RDataLoader)]
 _lib.dataloader_free.restype = None
 
+_lib.dataloader_start.argtypes = [ctypes.POINTER(RDataLoader)]
+_lib.dataloader_start.restype = None
+
+_lib.dataloader_next.argtypes = [
+    ctypes.POINTER(RDataLoader),
+    ctypes.POINTER(ctypes.POINTER(RTensor)),
+    ctypes.POINTER(ctypes.POINTER(RTensor))
+]
+_lib.dataloader_next.restype = ctypes.c_bool
+
 class TensorDataset:
     def __init__(self, data, targets):
         if not isinstance(data, Tensor): data = Tensor(data)
@@ -31,5 +41,26 @@ class DataLoader:
         self._ptr = _lib.dataloader_create(dataset._ptr, batch_size, shuffle, False, 0)
 
     def __del__(self):
-        # _lib.dataloader_free(self._ptr)
-        pass
+        try:
+            import sys
+            if sys is None or sys.is_finalizing() or _lib is None:
+                return
+        except:
+            return
+        if hasattr(self, "_ptr") and self._ptr:
+            try:
+                _lib.dataloader_free(self._ptr)
+            except:
+                pass
+            self._ptr = None
+
+    def __iter__(self):
+        _lib.dataloader_start(self._ptr)
+        return self
+
+    def __next__(self):
+        batch = ctypes.POINTER(RTensor)()
+        labels = ctypes.POINTER(RTensor)()
+        if not _lib.dataloader_next(self._ptr, ctypes.byref(batch), ctypes.byref(labels)):
+            raise StopIteration
+        return Tensor(_ptr=batch), Tensor(_ptr=labels)

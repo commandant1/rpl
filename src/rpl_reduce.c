@@ -35,7 +35,27 @@ float tensor_sum_all(const Tensor* t) {
 }
 
 float tensor_prod_all(const Tensor* t) {
-    float p = 1; for (uint32_t i = 0; i < t->size; i++) p *= t->data[i]; return p;
+#if RPITORCH_HAS_NEON
+    const float* d = t->data;
+    if (t->size >= 16) {
+        float32x4_t v0 = vld1q_f32(&d[0]), v1 = vld1q_f32(&d[4]);
+        float32x4_t v2 = vld1q_f32(&d[8]), v3 = vld1q_f32(&d[12]);
+        uint32_t i = 16;
+        for (; i + 16 <= t->size; i += 16) {
+            __builtin_prefetch(&d[i + 64], 0, 1);
+            v0 = vmulq_f32(v0, vld1q_f32(&d[i]));
+            v1 = vmulq_f32(v1, vld1q_f32(&d[i + 4]));
+            v2 = vmulq_f32(v2, vld1q_f32(&d[i + 8]));
+            v3 = vmulq_f32(v3, vld1q_f32(&d[i + 12]));
+        }
+        v0 = vmulq_f32(vmulq_f32(v0, v1), vmulq_f32(v2, v3));
+        float p = vgetq_lane_f32(v0, 0) * vgetq_lane_f32(v0, 1) *
+                  vgetq_lane_f32(v0, 2) * vgetq_lane_f32(v0, 3);
+        for (; i < t->size; i++) p *= d[i];
+        return p;
+    }
+#endif
+    float p = 1.0f; for (uint32_t i = 0; i < t->size; i++) p *= t->data[i]; return p;
 }
 
 float tensor_mean_all(const Tensor* t) { return tensor_sum_all(t) / t->size; }
@@ -122,6 +142,27 @@ uint32_t tensor_argmin_all(const Tensor* t) { float m = FLT_MAX; uint32_t idx = 
 float tensor_norm_all(const Tensor* t, float p) {
     if (p == 0) { float c = 0; for (uint32_t i = 0; i < t->size; i++) if (t->data[i] != 0) c++; return c; }
     if (p == INFINITY) { float m = 0; for (uint32_t i = 0; i < t->size; i++) { float a = fabsf(t->data[i]); if (a > m) m = a; } return m; }
+    // L1 fast path with NEON
+    if (p == 1.0f) {
+#if RPITORCH_HAS_NEON
+        const float* d = t->data;
+        float32x4_t v0 = vdupq_n_f32(0), v1 = v0, v2 = v0, v3 = v0;
+        uint32_t i = 0;
+        for (; i + 16 <= t->size; i += 16) {
+            __builtin_prefetch(&d[i + 64], 0, 1);
+            v0 = vaddq_f32(v0, vabsq_f32(vld1q_f32(&d[i])));
+            v1 = vaddq_f32(v1, vabsq_f32(vld1q_f32(&d[i + 4])));
+            v2 = vaddq_f32(v2, vabsq_f32(vld1q_f32(&d[i + 8])));
+            v3 = vaddq_f32(v3, vabsq_f32(vld1q_f32(&d[i + 12])));
+        }
+        v0 = vaddq_f32(vaddq_f32(v0, v1), vaddq_f32(v2, v3));
+        float s = vaddvq_f32(v0);
+        for (; i < t->size; i++) s += fabsf(d[i]);
+        return s;
+#else
+        float s = 0; for (uint32_t i = 0; i < t->size; i++) s += fabsf(t->data[i]); return s;
+#endif
+    }
     // L2 fast path with NEON
     if (p == 2.0f) {
 #if RPITORCH_HAS_NEON
@@ -156,18 +197,71 @@ static void reduce_axis_info(const Tensor* t, int32_t dim, uint32_t* outer, uint
     for (uint32_t d = dim+1; d < t->dims; d++) *inner *= t->shape[d];
 }
 
+void backward_sum(Tensor* t);
+void backward_mean(Tensor* t);
+
 static Tensor* make_reduced(const Tensor* t, int32_t dim) {
     if (dim < 0) dim += t->dims;
     uint32_t nd = t->dims - 1, s[MAX_DIMS], j = 0;
     for (uint32_t i = 0; i < t->dims; i++) if (i != (uint32_t)dim) s[j++] = t->shape[i];
     if (nd == 0) { s[0] = 1; nd = 1; }
-    return tensor_create(nd, s, false);
+    return tensor_create(nd, s, t->requires_grad && rpl_is_grad_enabled());
 }
 
 Tensor* tensor_sum(const Tensor* t, int32_t dim) {
     uint32_t outer, ds, inner;
     reduce_axis_info(t, dim, &outer, &ds, &inner);
     Tensor* out = make_reduced(t, dim);
+#if RPITORCH_HAS_NEON
+    if (inner == 1) {
+        #pragma omp parallel for if(outer * ds >= RPL_OMP_THRESHOLD)
+        for (uint32_t o = 0; o < outer; o++) {
+            const float* row = &t->data[o * ds];
+            float32x4_t v0 = vdupq_n_f32(0), v1 = v0, v2 = v0, v3 = v0;
+            uint32_t d = 0;
+            for (; d + 16 <= ds; d += 16) {
+                v0 = vaddq_f32(v0, vld1q_f32(&row[d]));
+                v1 = vaddq_f32(v1, vld1q_f32(&row[d + 4]));
+                v2 = vaddq_f32(v2, vld1q_f32(&row[d + 8]));
+                v3 = vaddq_f32(v3, vld1q_f32(&row[d + 12]));
+            }
+            v0 = vaddq_f32(vaddq_f32(v0, v1), vaddq_f32(v2, v3));
+            float s = vaddvq_f32(v0);
+            for (; d < ds; d++) s += row[d];
+            out->data[o] = s;
+        }
+    } else {
+        #pragma omp parallel for if(outer * ds * inner >= RPL_OMP_THRESHOLD)
+        for (uint32_t o = 0; o < outer; o++) {
+            float* out_row = &out->data[o * inner];
+            memset(out_row, 0, inner * sizeof(float));
+            for (uint32_t d = 0; d < ds; d++) {
+                const float* in_row = &t->data[(o * ds + d) * inner];
+                uint32_t i = 0;
+                for (; i + 16 <= inner; i += 16) {
+                    float32x4_t o0 = vld1q_f32(&out_row[i]);
+                    float32x4_t o1 = vld1q_f32(&out_row[i + 4]);
+                    float32x4_t o2 = vld1q_f32(&out_row[i + 8]);
+                    float32x4_t o3 = vld1q_f32(&out_row[i + 12]);
+                    o0 = vaddq_f32(o0, vld1q_f32(&in_row[i]));
+                    o1 = vaddq_f32(o1, vld1q_f32(&in_row[i + 4]));
+                    o2 = vaddq_f32(o2, vld1q_f32(&in_row[i + 8]));
+                    o3 = vaddq_f32(o3, vld1q_f32(&in_row[i + 12]));
+                    vst1q_f32(&out_row[i], o0);
+                    vst1q_f32(&out_row[i + 4], o1);
+                    vst1q_f32(&out_row[i + 8], o2);
+                    vst1q_f32(&out_row[i + 12], o3);
+                }
+                for (; i + 4 <= inner; i += 4) {
+                    vst1q_f32(&out_row[i], vaddq_f32(vld1q_f32(&out_row[i]), vld1q_f32(&in_row[i])));
+                }
+                for (; i < inner; i++) {
+                    out_row[i] += in_row[i];
+                }
+            }
+        }
+    }
+#else
     #pragma omp parallel for
     for (uint32_t o = 0; o < outer; o++)
         for (uint32_t i = 0; i < inner; i++) {
@@ -175,6 +269,17 @@ Tensor* tensor_sum(const Tensor* t, int32_t dim) {
             for (uint32_t d = 0; d < ds; d++) s += t->data[(o*ds+d)*inner+i];
             out->data[o*inner+i] = s;
         }
+#endif
+    
+    if (rpl_is_grad_enabled() && t->requires_grad) {
+        out->parent1 = (void*)t;
+        out->backward_fn = backward_sum;
+        out->is_leaf = false;
+        out->_op = OP_SUM;
+        out->_parents[0] = (Tensor*)t;
+        out->_n_parents = 1;
+        tensor_retain((Tensor*)t);
+    }
     return out;
 }
 
@@ -196,6 +301,11 @@ Tensor* tensor_mean(const Tensor* t, int32_t dim) {
     uint32_t ds = t->shape[dim < 0 ? dim + t->dims : dim];
     float inv = 1.0f / ds;
     for (uint32_t i = 0; i < s->size; i++) s->data[i] *= inv;
+    
+    if (rpl_is_grad_enabled() && t->requires_grad) {
+        s->_op = OP_MEAN;
+        s->backward_fn = backward_mean;
+    }
     return s;
 }
 

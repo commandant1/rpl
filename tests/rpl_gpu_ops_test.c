@@ -34,11 +34,9 @@ static bool test_gemm(void) {
     Tensor* B = tensor_create(2, sB, false);
     Tensor* C = tensor_create(2, sC, false);
 
-    /* A = all 1s, B = identity => C should be all K (128.0) */
+    /* A = all 1s, B = all 1s => C should be all K (128.0) */
     for (uint32_t i = 0; i < M*K; i++) A->data[i] = 1.0f;
-    for (uint32_t r = 0; r < K; r++)
-        for (uint32_t c = 0; c < N; c++)
-            B->data[r*N+c] = (r == c) ? 1.0f : 0.0f;
+    for (uint32_t i = 0; i < K*N; i++) B->data[i] = 1.0f;
 
     tensor_matmul_gpu(C, A, B);
     tensor_from_gpu(C);
