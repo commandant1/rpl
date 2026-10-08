@@ -7,6 +7,7 @@ from .core import (
 from . import nn
 from . import optim
 from . import data
+from . import diff_transformer
 try:
     from . import sklearn
 except ImportError:
